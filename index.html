@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>LumiNote | Pro Digital Notebook</title>
+    <link rel="stylesheet" href="style.css?v=2">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+
+<body class="goodnotes-theme">
+
+    <div class="app-shell">
+        <!-- Top Navigation (Tabs) -->
+        <header class="app-header">
+            <div class="header-left">
+                <button class="back-btn">Library</button>
+                <div class="tabs">
+                    <div class="tab active">
+                        <span class="tab-title">Organic Chemistry</span>
+                        <button class="tab-close">×</button>
+                    </div>
+                </div>
+            </div>
+            <div class="header-right">
+                <button id="undo-btn" class="nav-icon-btn">Undo</button>
+                <button id="redo-btn" class="nav-icon-btn">Redo</button>
+                <div class="divider-v"></div>
+                <select id="template-select" class="template-selector">
+                    <option value="plain">Plain</option>
+                    <option value="dotted">Dotted</option>
+                    <option value="grid">Grid</option>
+                </select>
+                <button id="add-page-btn" class="nav-icon-btn">➕</button>
+                <button id="sepia-toggle-btn" class="nav-icon-btn">🌙</button>
+                <button class="nav-icon-btn">Share</button>
+            </div>
+        </header>
+
+        <!-- Tool Toolbar (GoodNotes Style) -->
+        <div class="toolbar-container">
+            <div class="main-toolbar">
+                <div class="tool-group">
+                    <button class="tool-btn" data-tool="zoom">🔍</button>
+                    <button class="tool-btn active" data-tool="pen">🖋️</button>
+                    <button class="tool-btn" data-tool="eraser">🧹</button>
+                    <button class="tool-btn" data-tool="highlighter">🖍️</button>
+                    <button class="tool-btn" data-tool="shape">📐</button>
+                    <button class="tool-btn" data-tool="laser">🔦</button>
+                    <button class="tool-btn" data-tool="lasso">➰</button>
+                    <button class="tool-btn" data-tool="image">🖼️</button>
+                    <button class="tool-btn" data-tool="text">T</button>
+                </div>
+
+                <div class="middle-divider"></div>
+
+                <div class="contextual-options">
+                    <!-- Pen Options -->
+                    <div id="pen-settings" class="setting-row">
+                        <div class="color-slots">
+                            <div class="color-slot active" style="background: #000000;" data-color="#000000"></div>
+                            <div class="color-slot" style="background: #ef4444;" data-color="#ef4444"></div>
+                            <div class="color-slot" style="background: #3b82f6;" data-color="#3b82f6"></div>
+                            <div class="color-slot" style="background: #10b981;" data-color="#10b981"></div>
+                            <div class="color-custom-btn" title="Add Custom Color">
+                                <span>+</span>
+                                <input type="color" class="custom-color-input">
+                            </div>
+                        </div>
+                        <div class="divider"></div>
+                        <div class="size-slots" data-tool-type="pen">
+                            <div class="size-slot active" data-index="0"></div>
+                            <div class="size-slot" data-index="1"></div>
+                            <div class="size-slot" data-index="2"></div>
+                            <div id="pen-size-popover" class="size-popover hidden">
+                                <div class="popover-arrow"></div>
+                                <div class="slider-container">
+                                    <input type="range" class="size-adjust-slider" min="0.1" max="10" step="0.1">
+                                    <span class="size-value-display">1.0pt</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Highlighter Options -->
+                    <div id="highlighter-settings" class="setting-row hidden">
+                        <div class="color-slots">
+                            <div class="color-slot active" style="background: #ffeb3b;" data-color="#ffeb3b"></div>
+                            <div class="color-slot" style="background: #8bc34a;" data-color="#8bc34a"></div>
+                            <div class="color-slot" style="background: #03a9f4;" data-color="#03a9f4"></div>
+                        </div>
+                        <div class="divider"></div>
+                        <div class="size-slots" data-tool-type="highlighter">
+                            <div class="size-slot active" data-index="0"></div>
+                            <div class="size-slot" data-index="1"></div>
+                            <div class="size-slot" data-index="2"></div>
+                            <div id="highlighter-size-popover" class="size-popover hidden">
+                                <div class="popover-arrow"></div>
+                                <div class="slider-container">
+                                    <input type="range" class="size-adjust-slider" min="1" max="50" step="1">
+                                    <span class="size-value-display">20pt</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Eraser Options -->
+                    <div id="eraser-settings" class="setting-row hidden">
+                        <div class="eraser-modes">
+                            <button class="mode-btn" id="btn-erase-standard">Standard</button>
+                            <button class="mode-btn active" id="btn-erase-stroke">Stroke Eraser</button>
+                        </div>
+                        <div class="divider"></div>
+                        <div class="size-slots" data-tool-type="eraser">
+                            <div class="size-slot active" data-index="0"></div>
+                            <div class="size-slot" data-index="1"></div>
+                            <div class="size-slot" data-index="2"></div>
+                            <div id="eraser-size-popover" class="size-popover hidden">
+                                <div class="popover-arrow"></div>
+                                <div class="slider-container">
+                                    <input type="range" class="size-adjust-slider" min="5" max="100" step="1">
+                                    <span class="size-value-display">30pt</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Image Options -->
+                    <div id="image-settings" class="setting-row hidden">
+                        <div class="image-reel" id="recent-images-reel">
+                            <div class="reel-item add-btn"
+                                onclick="document.getElementById('image-upload-input').click()" title="Photo Library">
+                                <span>📁</span>
+                            </div>
+                            <div class="reel-item add-btn" id="camera-btn" title="Take Photo">
+                                <span>📷</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+
+
+
+        </div>
+
+        <!-- Main Workspace -->
+        <main class="workspace">
+            <div class="scroll-container">
+                <div class="canvas-wrapper">
+                    <!-- Pages will be generated here -->
+                </div>
+            </div>
+
+
+
+            <!-- Palm Guard -->
+            <div id="palm-hide" class="palm-hide">
+                <div class="palm-drag-handle"></div>
+                <div class="palm-label">Palm Guard Active</div>
+            </div>
+        </main>
+    </div>
+
+    <input type="file" id="image-upload-input" accept="image/*" multiple style="display: none;">
+    <script src="main.js?v=2"></script>
+</body>
+
+</html>
