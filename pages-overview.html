@@ -1,0 +1,44 @@
+<!-- Pages Overview Panel -->
+<div id="pages-overview-panel" class="library-overlay hidden" style="background: rgba(0,0,0,0.5); z-index: 6000;">
+    <div class="pages-overview-container" style="
+        background: white;
+        width: 90%;
+        max-width: 900px;
+        height: 85vh;
+        border-radius: 16px;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    ">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h2 style="margin: 0; font-size: 24px; font-weight: 700; color: #1c1c1e;">Pages Overview</h2>
+            <button id="close-pages-overview-btn" style="
+                background: #f2f2f7;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 16px;
+                font-size: 14px;
+                font-weight: 600;
+                color: #007aff;
+                cursor: pointer;
+            ">Done</button>
+        </div>
+
+        <div style="font-size: 14px; color: #8e8e93;">
+            Drag to reorder • Tap delete to remove
+        </div>
+
+        <div id="pages-grid" style="
+            flex: 1;
+            overflow-y: auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 16px;
+            padding: 8px;
+        ">
+            <!-- Page thumbnails will be inserted here -->
+        </div>
+    </div>
+</div>

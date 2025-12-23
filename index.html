@@ -5,10 +5,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>LumiNote | Pro Digital Notebook</title>
-    <link rel="stylesheet" href="style.css?v=2">
+    <link rel="stylesheet" href="style.css?v=9.3">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- PDF.js Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 
 <body class="goodnotes-theme">
@@ -19,11 +21,14 @@
             <div class="header-left">
                 <button class="back-btn">Library</button>
                 <div class="tabs">
-                    <div class="tab active">
-                        <span class="tab-title">Organic Chemistry</span>
-                        <button class="tab-close">×</button>
+                    <div id="tabs-list" style="display: flex; gap: 5px;">
+                        <!-- Tabs will be rendered dynamically here -->
                     </div>
+                    <button id="add-notebook-tab-btn" class="add-tab-btn" title="New Notebook">+</button>
                 </div>
+                <span style="font-size: 10px; color: #888; margin-left: 10px; opacity: 0.5;">v9.3</span>
+                <span id="save-status"
+                    style="font-size: 11px; color: #8e8e93; margin-left: 10px; font-weight: 500; transition: opacity 0.3s;"></span>
             </div>
             <div class="header-right">
                 <button id="undo-btn" class="nav-icon-btn">Undo</button>
@@ -35,6 +40,12 @@
                     <option value="grid">Grid</option>
                 </select>
                 <button id="add-page-btn" class="nav-icon-btn">➕</button>
+                <button id="pages-overview-btn" class="nav-icon-btn" title="Pages Overview">📑</button>
+                <button id="clear-cache-btn" class="nav-icon-btn"
+                    style="font-size: 10px; border: 1px solid #ccc; padding: 2px 5px;" title="Force Update">Reset
+                    App</button>
+                <label for="pdf-upload-input" class="nav-icon-btn" title="Import PDF"
+                    style="cursor: pointer; margin: 0;">📄</label>
                 <button id="sepia-toggle-btn" class="nav-icon-btn">🌙</button>
                 <button class="nav-icon-btn">Share</button>
             </div>
@@ -65,8 +76,12 @@
                             <div class="color-slot" style="background: #ef4444;" data-color="#ef4444"></div>
                             <div class="color-slot" style="background: #3b82f6;" data-color="#3b82f6"></div>
                             <div class="color-slot" style="background: #10b981;" data-color="#10b981"></div>
-                            <div class="color-custom-btn" title="Add Custom Color">
-                                <span>+</span>
+                            <div class="color-slot" style="background: #f59e0b;" data-color="#f59e0b"></div>
+                            <div class="color-slot" style="background: #a855f7;" data-color="#a855f7"></div>
+                            <div class="color-slot" style="background: #78350f;" data-color="#78350f"></div>
+                            <div class="color-slot" style="background: #1e3a8a;" data-color="#1e3a8a"></div>
+                            <div class="color-custom-btn" title="Edit Active Color">
+                                <span>✎</span>
                                 <input type="color" class="custom-color-input">
                             </div>
                         </div>
@@ -88,9 +103,18 @@
                     <!-- Highlighter Options -->
                     <div id="highlighter-settings" class="setting-row hidden">
                         <div class="color-slots">
-                            <div class="color-slot active" style="background: #ffeb3b;" data-color="#ffeb3b"></div>
-                            <div class="color-slot" style="background: #8bc34a;" data-color="#8bc34a"></div>
-                            <div class="color-slot" style="background: #03a9f4;" data-color="#03a9f4"></div>
+                            <div class="color-slot active" style="background: #fef08a;" data-color="#fef08a"></div>
+                            <div class="color-slot" style="background: #bbf7d0;" data-color="#bbf7d0"></div>
+                            <div class="color-slot" style="background: #bfdbfe;" data-color="#bfdbfe"></div>
+                            <div class="color-slot" style="background: #fbcfe8;" data-color="#fbcfe8"></div>
+                            <div class="color-slot" style="background: #e9d5ff;" data-color="#e9d5ff"></div>
+                            <div class="color-slot" style="background: #fed7aa;" data-color="#fed7aa"></div>
+                            <div class="color-slot" style="background: #99f6e4;" data-color="#99f6e4"></div>
+                            <div class="color-slot" style="background: #a5f3fc;" data-color="#a5f3fc"></div>
+                            <div class="color-custom-btn" title="Edit Active Color">
+                                <span>✎</span>
+                                <input type="color" class="custom-color-input">
+                            </div>
                         </div>
                         <div class="divider"></div>
                         <div class="size-slots" data-tool-type="highlighter">
@@ -162,11 +186,164 @@
                 <div class="palm-drag-handle"></div>
                 <div class="palm-label">Palm Guard Active</div>
             </div>
-        </main>
+
     </div>
 
-    <input type="file" id="image-upload-input" accept="image/*" multiple style="display: none;">
-    <script src="main.js?v=2"></script>
+    <!-- Library View Overlay -->
+    <div id="library-view" class="library-overlay hidden">
+        <div class="library-sidebar">
+            <div class="sidebar-header">
+                <h2>LumiNote</h2>
+            </div>
+            <div class="sidebar-nav">
+                <button class="nav-item active" data-view="all">📁 All Notebooks</button>
+                <button class="nav-item" data-view="recent">🕒 Recents</button>
+                <button class="nav-item" data-view="favorites">⭐ Favorites</button>
+                <div class="sidebar-section-title">Folders</div>
+                <div id="sidebar-folder-list" class="sidebar-folder-list">
+                    <!-- Folders are mirrored here for quick access -->
+                </div>
+            </div>
+            <div class="sidebar-footer">
+                <button id="lib-settings-btn" class="nav-item">⚙️ Settings</button>
+            </div>
+        </div>
+
+        <div class="library-main">
+            <div class="library-header">
+                <div class="header-search">
+                    <input type="text" id="lib-search-input" placeholder="Search notebooks...">
+                </div>
+                <div class="library-controls">
+                    <button id="import-pdf-library-btn" class="lib-tool-btn"
+                        style="background: #007aff; color: white; border: none;">📄 Import PDF</button>
+                    <button id="new-folder-btn" class="lib-tool-btn">New Folder</button>
+                    <select id="lib-sort-select" class="lib-tool-btn">
+                        <option value="date">Sort by Date</option>
+                        <option value="name">Sort by Name</option>
+                    </select>
+                    <button id="view-toggle-btn" class="lib-tool-btn">List View</button>
+                    <button id="close-library-btn" class="close-btn">Done</button>
+                </div>
+            </div>
+
+            <div class="library-content">
+                <div id="library-breadcrumbs" class="library-breadcrumbs">
+                    <!-- Breadcrumbs -->
+                </div>
+
+                <div id="notebook-grid" class="notebook-grid">
+                    <!-- Items -->
+                </div>
+            </div>
+        </div>
+        <!-- Move Item Modal -->
+        <div id="move-modal" class="library-overlay hidden"
+            style="background: rgba(0,0,0,0.4); justify-content: center; align-items: center; z-index: 6000; padding: 0;">
+            <div class="move-picker-container"
+                style="background: white; width: 400px; max-height: 80vh; border-radius: 20px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 40px rgba(0,0,0,0.2);">
+                <div class="move-picker-header"
+                    style="padding: 20px; border-bottom: 1px solid #f2f2f7; display: flex; justify-content: space-between; align-items: center;">
+                    <h3 style="margin: 0; font-size: 18px;">Move to...</h3>
+                    <button id="close-move-modal-btn"
+                        style="background:none; border:none; font-size: 24px; cursor: pointer; color: #8e8e93; line-height: 1;">×</button>
+                </div>
+                <div id="move-folder-list" class="move-folder-list"
+                    style="flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 2px;">
+                    <!-- Folders rendered here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Menu Modal (Action Sheet) -->
+        <div id="action-menu-modal" class="library-overlay hidden"
+            style="background: rgba(0,0,0,0.4); justify-content: center; align-items: flex-end; z-index: 6100; padding: 0;">
+            <div class="action-sheet-container"
+                style="background: white; width: 100%; max-width: 500px; border-radius: 24px 24px 0 0; padding: 20px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 -10px 40px rgba(0,0,0,0.2); animation: slideUp 0.3s ease-out;">
+                <div id="action-menu-title"
+                    style="font-weight: 700; font-size: 18px; margin-bottom: 5px; color: #1c1c1e; padding-left: 10px;">
+                    Item Options</div>
+
+                <!-- Color Picker Strip -->
+                <div id="color-picker-strip" class="color-picker-strip">
+                    <div class="color-option" data-color="default" style="background: #3b82f6;"></div>
+                    <div class="color-option" data-color="gold" style="background: #ffcc00;"></div>
+                    <div class="color-option" data-color="red" style="background: #ff3b30;"></div>
+                    <div class="color-option" data-color="green" style="background: #34c759;"></div>
+                    <div class="color-option" data-color="purple" style="background: #af52de;"></div>
+                    <div class="color-option" data-color="orange" style="background: #ff9500;"></div>
+                    <div class="color-option" data-color="teal" style="background: #5ac8fa;"></div>
+                    <div class="color-option" data-color="midnight" style="background: #1c1c1e;"></div>
+                </div>
+
+                <button id="menu-fav-btn" class="nav-item"
+                    style="display: flex; align-items: center; gap: 15px; font-size: 16px; padding: 12px;">⭐
+                    Favorite</button>
+                <button id="menu-rename-btn" class="nav-item"
+                    style="display: flex; align-items: center; gap: 15px; font-size: 16px; padding: 15px;">✎
+                    Rename</button>
+                <button id="menu-move-btn" class="nav-item"
+                    style="display: flex; align-items: center; gap: 15px; font-size: 16px; padding: 15px;">⎋ Move to
+                    Folder</button>
+                <button id="menu-delete-btn" class="nav-item"
+                    style="display: flex; align-items: center; gap: 15px; font-size: 16px; padding: 15px; color: #ff3b30;">×
+                    Delete</button>
+
+                <button id="close-action-menu-btn" class="nav-item"
+                    style="background: #f2f2f7; color: #8e8e93; font-weight: 600; margin-top: 10px; text-align: center; justify-content: center;">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Pages Sidebar -->
+        <div id="pages-sidebar" class="pages-sidebar hidden">
+            <div class="pages-sidebar-header">
+                <h3>Pages</h3>
+                <button id="close-pages-sidebar-btn" class="icon-btn">×</button>
+            </div>
+            <div class="pages-sidebar-hint">Drag to reorder</div>
+            <div id="pages-grid" class="pages-sidebar-grid">
+                <!-- Thumbnails will be injected here -->
+            </div>
+        </div>
+
+        <style>
+            @keyframes slideUp {
+                from {
+                    transform: translateY(100%);
+                }
+
+                to {
+                    transform: translateY(0);
+                }
+            }
+        </style>
+
+        <input type="file" id="image-upload-input" accept="image/*" multiple style="display: none;">
+        <input type="file" id="pdf-upload-input" accept="application/pdf,.pdf" multiple style="display: none;">
+        <script src="main.js?v=9.3"></script>
+        <script>
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('./sw.js?v=9.3').then(reg => {
+                    reg.onupdatefound = () => {
+                        const installingWorker = reg.installing;
+                        installingWorker.onstatechange = () => {
+                            if (installingWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                window.location.reload();
+                            }
+                        };
+                    };
+                });
+            }
+            document.getElementById('clear-cache-btn').onclick = async () => {
+                if (confirm('Reset App to force update? Notes are safe in LumiStore.')) {
+                    const names = await caches.keys();
+                    await Promise.all(names.map(name => caches.delete(name)));
+                    const regs = await navigator.serviceWorker.getRegistrations();
+                    for (let reg of regs) await reg.unregister();
+                    window.location.reload(true);
+                }
+            };
+        </script>
 </body>
 
 </html>

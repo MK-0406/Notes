@@ -1,0 +1,99 @@
+/* Pages Overview Panel */
+.page-thumbnail-card {
+    position: relative;
+    background: #f8f8f8;
+    border-radius: 12px;
+    overflow: hidden;
+    cursor: grab;
+    transition: all 0.2s;
+    border: 2px solid transparent;
+    display: flex;
+    flex-direction: column;
+}
+
+.page-thumbnail-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+    border-color: #007aff;
+}
+
+.page-thumbnail-card.dragging {
+    opacity: 0.5;
+    cursor: grabbing;
+}
+
+.page-thumbnail-card.drag-over {
+    border-color: #34c759;
+    background: #e8f5e9;
+}
+
+.page-thumbnail-preview {
+    width: 100%;
+    aspect-ratio: 841 / 1189;
+    background: white;
+    border-bottom: 1px solid #e5e5ea;
+    position: relative;
+    overflow: hidden;
+}
+
+.page-thumbnail-preview canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.page-thumbnail-info {
+    padding: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+
+.page-thumbnail-number {
+    font-size: 14px;
+    font-weight: 600;
+    color: #1c1c1e;
+    flex: 1;
+}
+
+.page-thumbnail-delete {
+    background: #ff3b30;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.page-thumbnail-delete:hover {
+    background: #d32f2f;
+    transform: scale(1.05);
+}
+
+.page-thumbnail-delete:active {
+    transform: scale(0.95);
+}
+
+.page-thumbnail-card.current-page {
+    border-color: #007aff;
+    box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
+}
+
+.page-thumbnail-card.current-page .page-thumbnail-number {
+    color: #007aff;
+}
+
+@media (max-width: 600px) {
+    #pages-grid {
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)) !important;
+    }
+
+    .pages-overview-container {
+        width: 95% !important;
+        padding: 16px !important;
+    }
+}

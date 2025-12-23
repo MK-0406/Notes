@@ -1,8 +1,57 @@
+// LumiStore: Simple IndexedDB Wrapper for Pro-Level Storage (Offline Tablet Support)
+class LumiStore {
+    constructor(dbName = 'LumiDatabase', storeName = 'LumiStore') {
+        this.dbName = dbName;
+        this.storeName = storeName;
+        this.db = null;
+    }
+
+    async getDB() {
+        if (this.db) return this.db;
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(this.dbName, 1);
+            request.onupgradeneeded = () => request.result.createObjectStore(this.storeName);
+            request.onsuccess = () => { this.db = request.result; resolve(this.db); };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async get(key) {
+        const db = await this.getDB();
+        return new Promise((resolve) => {
+            const tx = db.transaction(this.storeName, 'readonly');
+            const request = tx.objectStore(this.storeName).get(key);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => resolve(null);
+        });
+    }
+
+    async set(key, val) {
+        const db = await this.getDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.storeName, 'readwrite');
+            tx.objectStore(this.storeName).put(val, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+
+    async delete(key) {
+        const db = await this.getDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(this.storeName, 'readwrite');
+            tx.objectStore(this.storeName).delete(key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    }
+}
+
 class LumiNote {
     constructor() {
         this.container = document.querySelector('.canvas-wrapper');
-        this.ctx = null; // Current context for drawing operations
-        this.activeCanvas = null; // Canvas currently being interacted with
+        this.ctx = null;
+        this.activeCanvas = null;
 
         // App State
         this.isDrawing = false;
@@ -25,8 +74,8 @@ class LumiNote {
         this.opacity = 1.0;
 
         this.eraseEntireStroke = true;
-        this.hasChanged = false; // For history optimization
-        this.recentImages = []; // Track recent images for the reel
+        this.hasChanged = false;
+        this.recentImages = [];
 
         // Data Structures
         this.pages = [{ strokes: [], template: 'plain' }];
@@ -36,33 +85,76 @@ class LumiNote {
         this.selectedStrokes = [];
         this.moveStart = null;
 
-        // History: Store actions { pageIndex: number, type: 'modify'|'add'|'remove', data: JSON string of page strokes }
-        // Simplest robust undo: Snapshot the specific page content.
         this.undoStack = [];
         this.redoStack = [];
         this.holdStartTime = 0;
 
         this.palmGuardY = window.innerHeight - 100;
 
-        this.init();
-        this.palmGuardY = window.innerHeight - 100;
+        this.viewport = { scale: 1.0 };
+        this.activePointers = new Map(); // Track multi-touch for capacitive pens
+        this.gestureMode = null; // 'draw' or 'nav'
+        this.scrollStart = { x: 0, y: 0 };
+        this.lastGestureDist = null;
+        this.lastGestureCenter = null;
 
-        // New features state
-        this.viewport = { scale: 1 };
-        this.laserTrail = []; // {x, y, time}
+        this.laserTrail = [];
+        this.dpr = 4.0;
 
+        // Multi-Notebook & Folder State (v6.8)
+        this.notebooks = [];
+        this.activeNotebookId = null;
+        this.openNotebookIds = [];
+        this.currentFolderId = 'root';
+        this.viewMode = 'grid';
+        this.libraryCategory = 'all'; // 'all', 'recent', 'favorites'
+        this.searchQuery = '';
+        this.sortBy = 'date'; // 'date', 'name'
+        this.movingItemId = null;
+        this.selectedMenuId = null;
+
+
+        console.log('🚀 LumiNote: Constructing App...');
         this.init();
+    }
+
+    async init() {
+        console.log("LumiNote v6.8 (Folders & View Modes) Initializing...");
+        this.store = new LumiStore();
+
+        await this.loadLibraryIndex();
+        await this.loadSharedData();
+
+        if (this.openNotebookIds.length > 0) {
+            const lastId = await this.store.get('last_active_id');
+            const targetId = lastId && this.openNotebookIds.includes(lastId) ? lastId : this.openNotebookIds[0];
+            await this.openNotebook(targetId);
+        } else if (this.notebooks.length > 0) {
+            await this.openNotebook(this.notebooks[0].id);
+        } else {
+            await this.createNotebook("Quick Notes");
+        }
+
+        this.setupPages();
+        this.initializeVisuals();
+        this.setupScrollObserver();
         this.setupPalmGuard();
-        this.setupZoomHandlers(); // New handlers
+        this.setupZoomHandlers();
+        this.setupEventListeners();
+        this.setupLibraryListeners();
         this.render();
     }
 
-    init() {
-        this.loadNotes();
-        this.initializeVisuals();
-        this.setupScrollObserver();
-        this.setupPages(); // Initial page DOM creation
-        this.setupEventListeners(); // Must be after pages are created to attach to window/document or re-attach
+    getCoordinates(e, canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+        const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+
+        // Calculate coordinate relative to the canvas visual size
+        const x = (clientX - rect.left) / (rect.width / 841);
+        const y = (clientY - rect.top) / (rect.height / 1189);
+
+        return { x, y };
     }
 
     setupScrollObserver() {
@@ -70,56 +162,99 @@ class LumiNote {
             entries.forEach(entry => {
                 const idx = parseInt(entry.target.dataset.pageIndex);
                 if (!isNaN(idx) && this.pages[idx]) {
+                    const wasVisible = this.pages[idx].isVisible;
                     this.pages[idx].isVisible = entry.isIntersecting;
+
+                    // If a page becomes visible and background needs refresh, trigger render
+                    if (!wasVisible && entry.isIntersecting) {
+                        this.pages[idx].hasBgChanged = true;
+                        this.render();
+                    }
                 }
             });
 
             // Update current page indicator based on max visibility
-            const visible = entries.filter(e => e.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio);
-            if (visible.length > 0) {
-                const idx = parseInt(visible[0].target.dataset.pageIndex);
+            const visibleEntries = [...entries].filter(e => e.isIntersecting);
+            if (visibleEntries.length > 0) {
+                const mostVisible = visibleEntries.reduce((prev, curr) =>
+                    (curr.intersectionRatio > prev.intersectionRatio) ? curr : prev
+                );
+                const idx = parseInt(mostVisible.target.dataset.pageIndex);
                 if (!isNaN(idx)) {
                     this.currentPageIndex = idx;
                     this.updatePageIndicator();
                 }
             }
-        }, { threshold: [0.01, 0.1, 0.5, 0.9] });
+        }, { threshold: [0.01, 0.5, 0.9], rootMargin: '200px' });
     }
 
     setupPages() {
-        // Sync DOM with this.pages
-        const dpr = window.devicePixelRatio || 1;
-        const w = 841, h = 1189; // A4
+        this.dpr = 3.0; // Optimized for mobile memory stability while keeping retina sharpness
+        const dpr = this.dpr;
+        const scale = this.viewport.scale || 1.0;
 
-        // Clear existing if any
-        const existing = Array.from(this.container.querySelectorAll('.note-canvas'));
+        const baseW = 841;
+        const baseH = 1189;
 
-        // Remove extras
-        if (existing.length > this.pages.length) {
-            for (let i = this.pages.length; i < existing.length; i++) {
-                if (this.observer) this.observer.unobserve(existing[i]);
-                existing[i].remove();
+        const containers = Array.from(this.container.querySelectorAll('.page-container'));
+
+        // Sync containers with pages
+        if (containers.length > this.pages.length) {
+            for (let i = this.pages.length; i < containers.length; i++) {
+                if (this.observer) this.observer.unobserve(containers[i]);
+                containers[i].remove();
             }
         }
 
-        // Add/Update
         this.pages.forEach((page, i) => {
-            let canvas = existing[i];
-            if (!canvas) {
-                canvas = document.createElement('canvas');
-                canvas.className = 'note-canvas';
-                canvas.dataset.pageIndex = i;
-                this.attachCanvasEvents(canvas);
-                this.container.appendChild(canvas);
-                if (this.observer) this.observer.observe(canvas);
+            let pContainer = containers[i];
+            let bgCanvas, inkCanvas;
+
+            if (!pContainer) {
+                pContainer = document.createElement('div');
+                pContainer.className = 'page-container';
+                pContainer.dataset.pageIndex = i;
+
+                // Background Layer (PDF)
+                bgCanvas = document.createElement('canvas');
+                bgCanvas.className = 'bg-canvas note-canvas';
+
+                // Top Layer (Ink/Drawing) - This gets the events
+                inkCanvas = document.createElement('canvas');
+                inkCanvas.className = 'ink-canvas note-canvas';
+
+                pContainer.appendChild(bgCanvas);
+                pContainer.appendChild(inkCanvas);
+
+                this.attachCanvasEvents(inkCanvas);
+                this.container.appendChild(pContainer);
+                if (this.observer) this.observer.observe(pContainer);
+            } else {
+                bgCanvas = pContainer.querySelector('.bg-canvas');
+                inkCanvas = pContainer.querySelector('.ink-canvas');
             }
 
-            if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-                canvas.width = w * dpr;
-                canvas.height = h * dpr;
-                canvas.style.width = w + 'px';
-                canvas.style.height = h + 'px';
-            }
+            // Ensure correct interactive stacking
+            bgCanvas.style.pointerEvents = 'none';
+            inkCanvas.style.pointerEvents = 'auto';
+
+            const visualW = baseW * scale;
+            const visualH = baseH * scale;
+
+            pContainer.style.width = visualW + 'px';
+            pContainer.style.height = visualH + 'px';
+
+            [bgCanvas, inkCanvas].forEach(c => {
+                c.width = baseW * dpr;
+                c.height = baseH * dpr;
+                c.style.width = '100%';
+                c.style.height = '100%';
+                if (c === bgCanvas) {
+                    c.style.imageRendering = '-webkit-optimize-contrast';
+                    page.hasBgChanged = true; // RESIZE FIX: Resizing clears canvas, so we must redraw background
+                }
+                c.style.transform = 'translateZ(0)';
+            });
         });
     }
 
@@ -127,31 +262,39 @@ class LumiNote {
         canvas.addEventListener('pointerdown', (e) => this.handlePointerDown(e));
         canvas.addEventListener('pointermove', (e) => this.handlePointerMove(e));
         canvas.addEventListener('pointerup', (e) => this.handlePointerUp(e));
+        canvas.addEventListener('pointercancel', (e) => this.handlePointerUp(e));
     }
 
     setupZoomHandlers() {
-        const scrollContainer = this.container.parentElement; // .scroll-container
+        const scrollContainer = this.container.parentElement;
 
         // Wheel Zoom (Ctrl + Wheel)
         scrollContainer.addEventListener('wheel', (e) => {
             if (e.ctrlKey || e.metaKey) {
                 e.preventDefault();
-                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                // Reduce sensitivity for smoother control
+                const delta = e.deltaY > 0 ? 0.95 : 1.05;
                 this.setZoom(this.viewport.scale * delta);
             }
         }, { passive: false });
     }
 
     setZoom(newScale) {
-        this.viewport.scale = Math.max(0.5, Math.min(3.0, newScale));
-        this.container.style.transformOrigin = 'top center';
-        this.container.style.transform = `scale(${this.viewport.scale})`;
+        // Safe limit: Max 3.0x to prevent mobile browser canvas allocation failures
+        const target = Math.max(0.4, Math.min(3.0, newScale));
+        if (this.viewport.scale === target) return;
 
-        // Force redraw or just rely on CSS?
-        // CSS transform makes it blurry.
-        // For Pro quality, we might need to re-render.
-        // But re-rendering requires changing canvas dimensions which resets context.
-        // Let's stick to CSS for performant "viewing" zoom.
+        this.viewport.scale = target;
+
+        // SHARPNESS FIX: Remove container scaling, and instead update individual canvas CSS sizes
+        // this.container.style.transform = 'none'; // No longer needed, scaling is per-canvas
+        // this.container.style.transformOrigin = 'unset'; // No longer needed
+        // this.container.style.width = '100%'; // No longer needed
+
+        this.setupPages();
+        this.render();
+
+        console.log(`Zoom set to ${Math.round(this.viewport.scale * 100)}% (Native High-Res)`);
     }
 
     initializeVisuals() {
@@ -169,6 +312,25 @@ class LumiNote {
                 });
             }
         });
+    }
+
+    updateSlotVisual(slot, size, tool) {
+        if (!slot) return;
+        // Tool-specific sizing for the preview dot
+        let dotSize = size;
+        if (tool === 'highlighter') dotSize = size * 0.5;
+        if (tool === 'eraser') dotSize = size * 0.4;
+
+        slot.style.setProperty('--dot-size', Math.max(2, Math.min(24, dotSize)) + 'px');
+
+        // If it's the eraser, we might want a different visual (white with border)
+        if (tool === 'eraser') {
+            slot.style.backgroundColor = 'white';
+            slot.style.border = '1px solid #d2d2d7';
+        } else {
+            slot.style.backgroundColor = this.presets[tool]?.color || '#000000';
+            slot.style.border = 'none';
+        }
     }
 
     get currentPage() {
@@ -244,11 +406,20 @@ class LumiNote {
         document.querySelectorAll('.custom-color-input').forEach(input => {
             input.addEventListener('change', (e) => {
                 const color = e.target.value;
-                const toolType = input.closest('.setting-row').id.split('-')[0];
+                const row = input.closest('.setting-row');
+                const toolType = row.id.split('-')[0];
+
+                // Find the currently active slot in this row to "change existing color"
+                const activeSlot = row.querySelector('.color-slot.active');
+                if (activeSlot) {
+                    activeSlot.dataset.color = color;
+                    activeSlot.style.background = color;
+                }
+
                 this.color = color;
                 if (this.presets[toolType]) this.presets[toolType].color = color;
 
-                // Set the '+' button's background as feedback
+                // Sync the Edit button visual too
                 input.parentElement.style.background = color;
                 input.parentElement.style.borderColor = 'transparent';
                 input.parentElement.style.color = 'white';
@@ -319,7 +490,7 @@ class LumiNote {
         }
 
         // Interaction logic (History & Closing Popovers)
-        document.addEventListener('mousedown', (e) => {
+        document.addEventListener('pointerdown', (e) => {
             if (!e.target.closest('.size-popover') && !e.target.classList.contains('size-slot')) {
                 document.querySelectorAll('.size-popover').forEach(p => p.classList.add('hidden'));
             }
@@ -345,10 +516,25 @@ class LumiNote {
             this.scrollToPage(this.currentPageIndex);
         });
 
+        // Pages Overview (v9.1 Fixed)
+        const pagesOverviewBtn = document.getElementById('pages-overview-btn');
+        if (pagesOverviewBtn) {
+            pagesOverviewBtn.onclick = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('📑 Button Clicked (v9.1)');
+                this.openPagesOverview();
+            };
+        } else {
+            console.error('❌ Pages Overview Button Not Found');
+        }
+
         const templateSelect = document.getElementById('template-select');
         templateSelect.addEventListener('change', (e) => {
             this.currentPage.template = e.target.value;
+            this.currentPage.hasBgChanged = true; // Mark background for re-render
             this.saveNotes();
+            this.render(); // Request a re-render to show new template
         });
 
         // Image Tool Trigger
@@ -366,6 +552,32 @@ class LumiNote {
                 reader.readAsDataURL(file);
             });
         });
+
+        // PDF Import
+        const libPdfBtn = document.getElementById('import-pdf-library-btn');
+        const pdfInput = document.getElementById('pdf-upload-input');
+
+        if (libPdfBtn && pdfInput) {
+            libPdfBtn.onclick = (e) => {
+                e.preventDefault();
+                pdfInput.click();
+            };
+        }
+
+        if (pdfInput) {
+            pdfInput.onchange = async (e) => {
+                const files = e.target.files;
+                if (!files || files.length === 0) return;
+
+                console.log(`📁 Import triggered for ${files.length} PDF(s)`);
+                await this.importPDF(files);
+
+                // Refresh visuals
+                this.pages.forEach(p => p.hasBgChanged = true);
+                this.render();
+                pdfInput.value = ''; // Reset for next import
+            };
+        }
     }
 
     addImageToCanvas(src, x = 150, y = 150) {
@@ -451,14 +663,14 @@ class LumiNote {
     }
 
     scrollToPage(index) {
-        const canvases = this.container.querySelectorAll('.note-canvas');
-        if (canvases[index]) {
-            canvases[index].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const containers = this.container.querySelectorAll('.page-container');
+        if (containers[index]) {
+            containers[index].scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
     }
 
     addPage() {
-        this.pages.push({ strokes: [], template: 'plain' });
+        this.pages.push({ strokes: [], template: 'plain', hasBgChanged: true }); // New page needs background render
         this.currentPageIndex = this.pages.length - 1;
         this.setupPages();
         this.saveNotes();
@@ -476,79 +688,145 @@ class LumiNote {
     }
 
     recognizeAndStraightenShape() {
-        if (!this.currentStroke || this.currentStroke.points.length < 5) return;
+        if (!this.currentStroke || this.currentStroke.points.length < 10) return;
         const pts = this.currentStroke.points;
-        const start = pts[0];
-        const end = pts[pts.length - 1];
-
-        const distStartEnd = Math.hypot(end.x - start.x, end.y - start.y);
+        const first = pts[0];
+        const last = pts[pts.length - 1];
 
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         pts.forEach(p => {
-            minX = Math.min(minX, p.x);
-            minY = Math.min(minY, p.y);
-            maxX = Math.max(maxX, p.x);
-            maxY = Math.max(maxY, p.y);
+            minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
         });
-        const width = maxX - minX;
-        const height = maxY - minY;
-        const centerX = minX + width / 2;
-        const centerY = minY + height / 2;
 
-        const idealRadius = (width + height) / 4;
-        let circleVariance = 0;
+        const w = maxX - minX;
+        const h = maxY - minY;
+        const centerX = minX + w / 2;
+        const centerY = minY + h / 2;
+        const distStartEnd = Math.hypot(last.x - first.x, last.y - first.y);
+
+        // More lenient closure check for boxes/triangles
+        const isClosed = distStartEnd < Math.max(w, h) * 0.5 || distStartEnd < 60;
+
+        // 1. Check for Circle / Oval (Ellipse)
+        const rx = w / 2;
+        const ry = h / 2;
+        let ellipseVariance = 0;
         pts.forEach(p => {
-            const d = Math.hypot(p.x - centerX, p.y - centerY);
-            circleVariance += Math.abs(d - idealRadius);
+            const dx = (p.x - centerX) / (rx || 1);
+            const dy = (p.y - centerY) / (ry || 1);
+            ellipseVariance += Math.abs(Math.sqrt(dx * dx + dy * dy) - 1);
         });
-        circleVariance /= pts.length;
+        ellipseVariance /= pts.length;
 
-        if (circleVariance < idealRadius * 0.25) {
+        if (ellipseVariance < 0.12) {
             const circlePts = [];
-            for (let i = 0; i <= 60; i++) {
-                const angle = (i / 60) * Math.PI * 2;
-                circlePts.push({ x: centerX + Math.cos(angle) * idealRadius, y: centerY + Math.sin(angle) * idealRadius });
+            const steps = 72;
+            const sizeDiff = Math.abs(w - h);
+            const isCircle = sizeDiff < Math.max(w, h) * 0.2;
+
+            let finalRx = rx;
+            let finalRy = ry;
+
+            if (isCircle) {
+                const avgR = (rx + ry) / 2;
+                finalRx = avgR;
+                finalRy = avgR;
+            }
+
+            for (let i = 0; i <= steps; i++) {
+                const angle = (i / steps) * Math.PI * 2;
+                circlePts.push({ x: centerX + Math.cos(angle) * finalRx, y: centerY + Math.sin(angle) * finalRy });
             }
             this.currentStroke.points = circlePts;
             this.currentStroke.isShape = true;
             return;
         }
 
-        const isClosed = distStartEnd < Math.max(width, height) * 0.4;
+        // 2. Polygonal Shapes
         if (isClosed) {
-            if (width / height > 0.6 && width / height < 1.4) {
+            // Check if it's more like a Rectangle or a Triangle
+            // We use the area of the stroke vs the area of the bounding box
+            let strokeArea = 0;
+            for (let i = 0; i < pts.length - 1; i++) {
+                strokeArea += (pts[i].x * pts[i + 1].y - pts[i + 1].x * pts[i].y);
+            }
+            strokeArea = Math.abs(strokeArea) / 2;
+            const boxArea = w * h;
+            const ratio = strokeArea / (boxArea || 1);
+
+            // Quadrilaterals usually occupy > 80% of their bounding box
+            // Triangles occupy ~50%. We set the split at 0.7 for safety.
+            if (ratio > 0.7) {
+                // SQUARE / RECTANGLE
+                const isSquare = Math.abs(w - h) < Math.max(w, h) * 0.15;
+                const side = Math.max(w, h);
+                const finalW = isSquare ? side : w;
+                const finalH = isSquare ? side : h;
+                const finalX = centerX - finalW / 2;
+                const finalY = centerY - finalH / 2;
+
                 this.currentStroke.points = [
-                    { x: minX, y: minY }, { x: maxX, y: minY },
-                    { x: maxX, y: maxY }, { x: minX, y: maxY }, { x: minX, y: minY }
+                    { x: finalX, y: finalY }, { x: finalX + finalW, y: finalY },
+                    { x: finalX + finalW, y: finalY + finalH }, { x: finalX, y: finalY + finalH },
+                    { x: finalX, y: finalY }
                 ];
             } else {
+                // TRIANGLE (Iso-ish)
                 this.currentStroke.points = [
                     { x: centerX, y: minY }, { x: maxX, y: maxY },
                     { x: minX, y: maxY }, { x: centerX, y: minY }
                 ];
             }
+            this.currentStroke.isShape = true;
         } else {
-            this.currentStroke.points = [start, end];
+            // STRAIGHT LINE
+            this.currentStroke.points = [first, last];
+            this.currentStroke.isShape = true;
         }
     }
 
     handlePointerDown(e) {
+        // Track pointer for multi-touch
+        this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+        // Navigation Mode Switch: 2+ fingers = Scroll/Zoom, 1 finger = Write
+        if (this.activePointers.size >= 2) {
+            this.gestureMode = 'nav';
+            if (this.isDrawing) {
+                this.isDrawing = false;
+                this.currentStroke = null; // Cancel accidental mark
+            }
+            this.scrollStart = {
+                x: this.container.parentElement.scrollLeft,
+                y: this.container.parentElement.scrollTop
+            };
+            this.lastGestureDist = this.getGestureDist();
+            this.lastGestureCenter = this.getGestureCenter();
+            this.render();
+            return;
+        }
+
+        if (this.activePointers.size === 1) {
+            this.gestureMode = 'draw';
+        }
+
         // Palm Guard Check
         if (e.clientY > this.palmGuardY) return;
-        if (e.pointerType === 'touch' && (e.width > 20 || e.height > 20)) return;
 
         // Determine which page we are on
-        const canvas = e.target.closest('.note-canvas');
+        const canvas = e.target.closest('.ink-canvas'); // Only interact with the ink canvas
         if (!canvas) return;
 
         this.activeCanvas = canvas;
-        this.currentPageIndex = parseInt(canvas.dataset.pageIndex);
+        this.currentPageIndex = parseInt(canvas.closest('.page-container').dataset.pageIndex);
         this.updatePageIndicator();
 
         const coords = this.getCoordinates(e, canvas);
         this.holdStartTime = Date.now();
         this.lastMoveTime = Date.now();
         this.hasChanged = false;
+        this.lastCoords = coords;
 
         // Capture state of THIS page for undo
         this.preInteractionState = JSON.stringify(this.pages[this.currentPageIndex].strokes);
@@ -610,7 +888,8 @@ class LumiNote {
                 color: this.tool === 'eraser' ? 'eraser' : this.color,
                 width: this.lineWidth,
                 opacity: this.tool === 'highlighter' ? 0.3 : 1.0,
-                tool: this.tool
+                tool: this.tool,
+                id: Date.now() + Math.random() // Unique ID for splitting logic
             };
         }
     }
@@ -622,9 +901,13 @@ class LumiNote {
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'canvas-text-input';
-        // Use exact screen coordinates
-        input.style.left = (rect.left + window.scrollX + coords.x) + 'px';
-        input.style.top = (rect.top + window.scrollY + coords.y) + 'px';
+
+        // Accurate Screen Mapping: Internal pts -> Screen pixels
+        const screenX = rect.left + (coords.x / 841) * rect.width;
+        const screenY = rect.top + (coords.y / 1189) * rect.height;
+
+        input.style.left = screenX + 'px';
+        input.style.top = screenY + 'px';
         input.style.color = this.color;
         input.style.fontSize = (initialSize || (this.lineWidth * 4 + 12)) + 'px';
         input.value = initialText;
@@ -655,8 +938,11 @@ class LumiNote {
     finalizeText(input, coords) {
         const val = input.value;
         if (val) {
-            this.ctx.font = input.style.fontSize + " Inter, sans-serif";
-            const metrics = this.ctx.measureText(val);
+            // Use a temporary canvas context to measure text if this.ctx is not available or not the right one
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.font = input.style.fontSize + " Inter, sans-serif";
+            const metrics = tempCtx.measureText(val);
             const height = parseInt(input.style.fontSize);
 
             this.currentPage.strokes.push({
@@ -676,6 +962,27 @@ class LumiNote {
     }
 
     handlePointerMove(e) {
+        this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+        if (this.gestureMode === 'nav') {
+            const center = this.getGestureCenter();
+            const distX = center.x - this.lastGestureCenter.x;
+            const distY = center.y - this.lastGestureCenter.y;
+
+            this.container.parentElement.scrollLeft = this.scrollStart.x - distX;
+            this.container.parentElement.scrollTop = this.scrollStart.y - distY;
+
+            const dist = this.getGestureDist();
+            if (this.lastGestureDist && dist > 0) {
+                const ratio = dist / this.lastGestureDist;
+                if (Math.abs(1 - ratio) > 0.01) {
+                    this.setZoom(this.viewport.scale * ratio);
+                    this.lastGestureDist = dist;
+                }
+            }
+            return;
+        }
+
         // Use active canvas if known, otherwise we might be dragging across (?) 
         // For drawing, we stick to one page usually.
         if (!this.activeCanvas) return;
@@ -687,14 +994,22 @@ class LumiNote {
             }
 
             const lastPoint = this.currentStroke.points[this.currentStroke.points.length - 1];
-            const dist = Math.hypot(coords.x - lastPoint.x, coords.y - lastPoint.y);
 
-            this.currentStroke.points.push(coords);
+            // Input Smoothing (Moving Average): Reduces "pixelated" jitters
+            const smoothingFactor = 0.5;
+            const smoothedX = lastPoint.x * smoothingFactor + coords.x * (1 - smoothingFactor);
+            const smoothedY = lastPoint.y * smoothingFactor + coords.y * (1 - smoothingFactor);
 
-            // Only reset the hold timer if the movement is significant (> 1px)
+            const dist = Math.hypot(smoothedX - lastPoint.x, smoothedY - lastPoint.y);
+
+            // Only add point and reset hold timer if movement is significant
             // This filters out minor tremors/jitter while holding the pen still
-            if (dist > 1) {
-                this.lastMoveTime = Date.now();
+            if (dist > (this.tool === 'highlighter' ? 3 : 1)) {
+                this.currentStroke.points.push({ x: smoothedX, y: smoothedY });
+                // Only reset pause timer if movement is significant (> 5px)
+                // This allows auto-shape hold to trigger even with minor tremors
+                if (dist > 5) this.lastMoveTime = Date.now();
+                this.render();
             }
 
             if (this.tool === 'eraser') {
@@ -702,6 +1017,7 @@ class LumiNote {
             }
         } else if (this.tool === 'laser' && this.isDrawing) {
             this.laserTrail.push({ x: coords.x, y: coords.y, time: Date.now() });
+            this.render();
         } else if (this.tool === 'zoom' && this.isMoving) {
             const dx = e.clientX - this.moveStart.x;
             const dy = e.clientY - this.moveStart.y;
@@ -709,6 +1025,7 @@ class LumiNote {
             this.container.parentElement.scrollTop = this.scrollStart.y - dy;
         } else if (this.isLassoing) {
             this.lassoPath.push(coords);
+            this.render();
         } else if (this.isMoving) {
             const dx = coords.x - this.moveStart.x;
             const dy = coords.y - this.moveStart.y;
@@ -723,6 +1040,7 @@ class LumiNote {
             if (this.lassoPath) this.lassoPath.forEach(p => { p.x += dx; p.y += dy; });
             this.moveStart = coords;
             this.hasChanged = true;
+            this.render();
         } else if (this.isResizing) {
             const bounds = this.getSelectionBounds();
             if (!bounds || bounds.w === 0 || bounds.h === 0) return;
@@ -763,19 +1081,25 @@ class LumiNote {
             }
             this.moveStart = coords;
             this.hasChanged = true;
+            this.render();
         }
     }
 
-    handlePointerUp() {
+    handlePointerUp(e) {
+        if (e) this.activePointers.delete(e.pointerId);
+
+        if (this.activePointers.size === 0) {
+            this.gestureMode = null;
+        }
+
         if (this.tool === 'laser') {
             this.isDrawing = false;
-            // Trail fades out automatically in render
         }
 
         if (this.isDrawing && this.tool !== 'laser') {
-            // Shape straightening / Recognition - check if pen was HELD STILL for > 700ms
+            // Shape straightening / Recognition - check if pen was HELD STILL for > 1500ms
             const pauseDuration = Date.now() - this.lastMoveTime;
-            if (this.tool === 'shape' || (this.tool !== 'eraser' && pauseDuration > 700)) {
+            if (this.tool === 'shape' || (this.tool !== 'eraser' && pauseDuration > 1500)) {
                 this.recognizeAndStraightenShape();
             }
 
@@ -822,9 +1146,11 @@ class LumiNote {
             this.isResizing = false;
         }
 
+        this.render(); // FINAL RENDER after all flags are cleared
+
         if (this.hasChanged) {
             this.pushUndo(this.currentPageIndex, this.preInteractionState);
-            this.saveNotes();
+            this.triggerAutoSave();
         }
     }
 
@@ -837,84 +1163,67 @@ class LumiNote {
         if (this.undoStack.length > 50) this.undoStack.shift();
     }
 
-    getCoordinates(e, canvas) {
-        const c = canvas || this.activeCanvas;
-        if (!c) return { x: 0, y: 0 };
-        const rect = c.getBoundingClientRect(); // Visual dimensions (screen px) including CSS transform
+    getGestureDist() {
+        const pts = Array.from(this.activePointers.values());
+        if (pts.length < 2) return 0;
+        return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    }
 
-        // We render with ctx.scale(dpr, dpr).
-        // This means drawing at (10, 10) draws at 10px logical, which is 10*dpr physical.
-        // So we need to return LOGICAL coordinates relative to the un-transformed element.
-
-        // rect.width is Visual Width. 
-        // c.offsetWidth is Logical Width (approx, if no transform).
-        // Best approach: Map screen ratio to logical ratio.
-
-        // Logical Width of the canvas is determined by its style (e.g., 841px).
-        // We can parse it or trust offsetWidth if un-rotated.
-        const logicalWidth = c.offsetWidth;
-        const logicalHeight = c.offsetHeight;
-
-        const scaleX = logicalWidth / rect.width;
-        const scaleY = logicalHeight / rect.height;
-
+    getGestureCenter() {
+        const pts = Array.from(this.activePointers.values());
+        if (pts.length === 0) return { x: 0, y: 0 };
+        if (pts.length === 1) return pts[0];
         return {
-            x: (e.clientX - rect.left) * scaleX,
-            y: (e.clientY - rect.top) * scaleY
+            x: (pts[0].x + pts[1].x) / 2,
+            y: (pts[0].y + pts[1].y) / 2
         };
     }
 
-    updateSlotVisual(slot, val, toolType) {
-        if (!slot) return;
-        let visualSize;
-        if (toolType === 'pen') {
-            visualSize = 4 + (val * 1.2);
-        } else if (toolType === 'highlighter') {
-            visualSize = 8 + (val * 0.4);
-        } else { // eraser
-            visualSize = 10 + (val * 0.3);
-        }
-        slot.style.width = visualSize + 'px';
-        slot.style.height = visualSize + 'px';
+    getCoordinates(e, canvas) {
+        const c = canvas || this.activeCanvas;
+        if (!c) return { x: 0, y: 0 };
+        const rect = c.getBoundingClientRect();
+
+        const baseW = 841;
+        const baseH = 1189;
+
+        // Perfect tracking: Always map current visual bounds to 841x1189 pts
+        return {
+            x: ((e.clientX - rect.left) / rect.width) * baseW,
+            y: ((e.clientY - rect.top) / rect.height) * baseH
+        };
     }
 
     undo() {
         if (this.undoStack.length === 0) return;
-
         const action = this.undoStack.pop();
         const pageIndex = action.pageIndex;
         const page = this.pages[pageIndex];
-
-        // Push current state to redo
         this.redoStack.push({
             pageIndex: pageIndex,
             strokes: JSON.stringify(page.strokes)
         });
-
-        // Apply undo
         page.strokes = JSON.parse(action.strokes);
-        this.saveNotes(); // Save ALL notes (simple)
-
-        // Ensure we are viewing the change if possible (optional UX)
-        // this.scrollToPage(pageIndex);
+        this.selectedStrokes = [];
+        this.lassoPath = null;
+        this.saveNotes();
+        this.render();
     }
 
     redo() {
         if (this.redoStack.length === 0) return;
-
         const action = this.redoStack.pop();
         const pageIndex = action.pageIndex;
         const page = this.pages[pageIndex];
-
-        // Push current state to undo
         this.undoStack.push({
             pageIndex: pageIndex,
             strokes: JSON.stringify(page.strokes)
         });
-
-        // Apply redo
         page.strokes = JSON.parse(action.strokes);
+        this.selectedStrokes = [];
+        this.lassoPath = null;
         this.saveNotes();
+        this.render();
     }
 
     findSelectedStrokes() {
@@ -971,7 +1280,6 @@ class LumiNote {
                 if (found) break;
             }
         }
-
         if (found) {
             this.selectedStrokes = [found];
             const b = this.getSelectionBounds();
@@ -1000,73 +1308,56 @@ class LumiNote {
     performErase(eraser) {
         const radius = this.lineWidth / 2;
         if (eraser.points.length < 2) return;
-
-        const ep2 = eraser.points[eraser.points.length - 1]; // Current eraser point
-        const ep1 = eraser.points[eraser.points.length - 2]; // Previous eraser point
-
+        const ep2 = eraser.points[eraser.points.length - 1];
+        const ep1 = eraser.points[eraser.points.length - 2];
         if (this.eraseEntireStroke) {
-            const initialCount = this.currentPage.strokes.length;
             this.currentPage.strokes = this.currentPage.strokes.filter(stroke => {
-                if (!stroke.points || stroke.points.length < 2) return true; // Keep text/images
-                // Check every segment of the stroke against the eraser's movement segment
+                if (!stroke.points || stroke.points.length < 2) return true;
                 for (let i = 0; i < stroke.points.length - 1; i++) {
-                    const sp1 = stroke.points[i];
-                    const sp2 = stroke.points[i + 1];
-                    if (this.segmentsDistance(ep1, ep2, sp1, sp2) < radius) return false;
+                    if (this.segmentsDistance(ep1, ep2, stroke.points[i], stroke.points[i + 1]) < radius) return false;
                 }
                 return true;
             });
-            if (this.currentPage.strokes.length !== initialCount) this.hasChanged = true;
         } else {
-            let changed = false;
-            let resultStrokes = [];
-
-            this.currentPage.strokes.forEach(stroke => {
-                if (!stroke.points || stroke.points.length < 2) {
-                    resultStrokes.push(stroke);
+            // Standard Erasing: Split strokes at intersection points
+            let newStrokes = [];
+            this.currentPage.strokes.forEach(s => {
+                if (!s.points || s.points.length < 2 || s.type === 'image' || s.type === 'text') {
+                    newStrokes.push(s);
                     return;
                 }
-                let currentSubPoints = [stroke.points[0]];
 
-                for (let i = 0; i < stroke.points.length - 1; i++) {
-                    const sp1 = stroke.points[i];
-                    const sp2 = stroke.points[i + 1];
+                let currentPath = [];
+                for (let i = 0; i < s.points.length - 1; i++) {
+                    const s1 = s.points[i];
+                    const s2 = s.points[i + 1];
+                    // Eraser line segment against stroke line segment
+                    const hit = this.segmentsDistance(ep1, ep2, s1, s2) < radius;
 
-                    if (this.segmentsDistance(ep1, ep2, sp1, sp2) < radius) {
-                        // Intersection! Break the current sub-stroke
-                        if (currentSubPoints.length > 1) {
-                            resultStrokes.push({ ...stroke, points: currentSubPoints });
+                    if (hit) {
+                        if (currentPath.length > 0) {
+                            newStrokes.push({ ...s, points: currentPath, id: Date.now() + Math.random() });
+                            currentPath = [];
                         }
-                        currentSubPoints = [sp2]; // Start fresh from the next point
-                        changed = true;
                     } else {
-                        currentSubPoints.push(sp2);
+                        if (currentPath.length === 0) currentPath.push(s1);
+                        currentPath.push(s2);
                     }
                 }
-
-                if (currentSubPoints.length > 1) {
-                    resultStrokes.push({ ...stroke, points: currentSubPoints });
+                if (currentPath.length > 1) {
+                    newStrokes.push({ ...s, points: currentPath, id: Date.now() + Math.random() });
                 }
             });
-
-            if (changed) {
-                this.currentPage.strokes = resultStrokes;
-                this.hasChanged = true;
-            }
+            this.currentPage.strokes = newStrokes;
         }
+        // Force immediate render for erase feedback
+        this.render();
     }
 
-    // Advanced: Shortest distance between two line segments (ep1-ep2) and (sp1-sp2)
     segmentsDistance(p1, p2, p3, p4) {
-        // First check if points are within radius of segments (standard check)
-        const d1 = this.distToSegment(p3, p1, p2);
-        const d2 = this.distToSegment(p4, p1, p2);
-        const d3 = this.distToSegment(p1, p3, p4);
-        const d4 = this.distToSegment(p2, p3, p4);
-        return Math.min(d1, d2, d3, d4);
+        return Math.min(this.distToSegment(p3, p1, p2), this.distToSegment(p4, p1, p2), this.distToSegment(p1, p3, p4), this.distToSegment(p2, p3, p4));
     }
 
-    // Helper: Distance from point p to line segment v-w
     distToSegment(p, v, w) {
         const l2 = Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2);
         if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
@@ -1076,305 +1367,208 @@ class LumiNote {
     }
 
     render() {
-        const dpr = window.devicePixelRatio || 1;
-        const canvases = this.container.querySelectorAll('.note-canvas');
+        const dpr = this.dpr || 8.0;
+        const containers = this.container.querySelectorAll('.page-container');
+        const baseW = 841;
+        const baseH = 1189;
 
         this.pages.forEach((page, index) => {
-            // Optimization: Skip rendering if not visible (set by Observer)
-            // If isVisible is undefined (first run), we render.
             if (page.isVisible === false) return;
+            const pContainer = containers[index];
+            if (!pContainer) return;
+            const bgCanvas = pContainer.querySelector('.bg-canvas');
+            const inkCanvas = pContainer.querySelector('.ink-canvas');
+            const bgCtx = bgCanvas.getContext('2d');
+            const inkCtx = inkCanvas.getContext('2d');
 
-            const canvas = canvases[index];
-            if (!canvas) return;
+            if (page.hasBgChanged !== false) {
+                const img = page._pdfImageCache;
+                const isPdfReady = !page.pdfBackground || (img && img.complete && img.naturalWidth > 0);
 
-            const ctx = canvas.getContext('2d');
+                if (isPdfReady) {
+                    bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    bgCtx.clearRect(0, 0, baseW, baseH);
 
-            // Set transform for High DPI
-            // Reset transform before setting it to avoid compounding
-            ctx.setTransform(1, 0, 0, 1, 0, 0);
-            ctx.scale(dpr, dpr);
+                    if (page.pdfBackground) {
+                        if (!img) {
+                            page._pdfImageCache = new Image();
+                            page._pdfImageCache.src = page.pdfBackground;
+                            page._pdfImageCache.onload = () => { page.hasBgChanged = true; this.render(); };
+                        } else {
+                            bgCtx.drawImage(img, 0, 0, baseW, baseH);
+                        }
+                    }
 
-            // Clear
-            ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+                    if (page.template === 'dotted') this.drawDotsTo(bgCtx, baseW, baseH);
+                    else if (page.template === 'grid') this.drawGridTo(bgCtx, baseW, baseH);
 
-            // Setup context for drawing callbacks
-            this.ctx = ctx; // Hacky but works since we are single threaded
-            // We need to pass the page template maybe?
+                    page.hasBgChanged = false;
+                } else {
+                    // PDF image is still loading, ensure we have the image object and listener
+                    if (!img) {
+                        page._pdfImageCache = new Image();
+                        page._pdfImageCache.src = page.pdfBackground;
+                        page._pdfImageCache.onload = () => { page.hasBgChanged = true; this.render(); };
+                    }
+                }
+            }
 
-            if (page.template === 'dotted') this.drawDots(canvas.width / dpr, canvas.height / dpr);
-            else if (page.template === 'grid') this.drawGrid(canvas.width / dpr, canvas.height / dpr);
-
+            inkCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            inkCtx.clearRect(0, 0, baseW, baseH);
+            this.ctx = inkCtx;
             page.strokes.forEach(s => this.drawStroke(s));
-
-            // Draw Current Stroke (only if we are on this page)
             if (this.currentPageIndex === index && this.currentStroke) {
                 this.drawStroke(this.currentStroke);
-                // Eraser Preview
-                if (this.tool === 'eraser' && this.isDrawing && this.currentStroke && this.currentStroke.points.length > 0) {
+                if (this.tool === 'eraser' && this.isDrawing) {
                     const last = this.currentStroke.points[this.currentStroke.points.length - 1];
-                    ctx.beginPath();
-                    ctx.arc(last.x, last.y, this.lineWidth / 2, 0, Math.PI * 2);
-                    ctx.fillStyle = 'rgba(0, 122, 255, 0.1)';
-                    ctx.strokeStyle = 'rgba(0, 122, 255, 0.3)';
-                    ctx.lineWidth = 1;
-                    ctx.fill();
-                    ctx.stroke();
+                    inkCtx.beginPath(); inkCtx.arc(last.x, last.y, this.lineWidth / 2, 0, Math.PI * 2);
+                    inkCtx.fillStyle = 'rgba(0,122,255,0.1)'; inkCtx.fill();
                 }
             }
-
-            // Draw Lasso Overlay (only if on this page)
-            if (this.currentPageIndex === index && this.lassoPath) {
-                ctx.beginPath();
-                ctx.setLineDash([5, 5]);
-                ctx.strokeStyle = '#007aff';
-                ctx.lineWidth = 1;
-                this.lassoPath.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-                ctx.stroke();
-                ctx.setLineDash([]);
-                if (!this.isLassoing) {
-                    ctx.fillStyle = 'rgba(0, 122, 255, 0.05)';
-                    ctx.fill();
-                }
+            if (this.currentPageIndex === index && (this.lassoPath || this.selectedStrokes.length > 0)) {
+                this.renderOverlays(inkCtx, index);
             }
 
-            // Draw Selection Box (only if active page)
-            if (this.currentPageIndex === index && this.selectedStrokes.length > 0) {
-                const bounds = this.getSelectionBounds();
-                if (bounds) {
-                    ctx.strokeStyle = '#007aff';
-                    ctx.setLineDash([5, 5]);
-                    ctx.lineWidth = 1;
-                    ctx.strokeRect(bounds.x, bounds.y, bounds.w, bounds.h);
-                    ctx.setLineDash([]);
-
-                    // Draw Resize Handle (Bottom-Right)
-                    ctx.fillStyle = '#ffffff';
-                    ctx.strokeStyle = '#007aff';
-                    ctx.lineWidth = 2;
-                    ctx.beginPath();
-                    ctx.arc(bounds.x + bounds.w, bounds.y + bounds.h, 6, 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.stroke();
-                }
-            }
-
-            // Draw Laser Trail (if active on this page)
+            // Laser Trail
             if (this.currentPageIndex === index && this.laserTrail.length > 0) {
                 const now = Date.now();
-                // Filter old points
-                this.laserTrail = this.laserTrail.filter(p => now - p.time < 800);
-
+                this.laserTrail = this.laserTrail.filter(p => now - p.time < 1000);
                 if (this.laserTrail.length > 1) {
-                    ctx.shadowBlur = 6;
-                    ctx.shadowColor = '#ff3b30'; // iOS Red
-                    ctx.strokeStyle = 'rgba(255, 59, 48, 0.6)'; // Semi-transparent red trail
-                    ctx.lineWidth = 4;
-                    ctx.lineCap = 'round';
-                    ctx.lineJoin = 'round';
-                    ctx.globalCompositeOperation = 'source-over';
-
-                    ctx.beginPath();
-                    // Use quadratic curves for smooth laser too
-                    ctx.moveTo(this.laserTrail[0].x, this.laserTrail[0].y);
-                    for (let i = 1; i < this.laserTrail.length; i++) {
-                        ctx.lineTo(this.laserTrail[i].x, this.laserTrail[i].y);
+                    inkCtx.strokeStyle = '#ff2d55';
+                    inkCtx.lineWidth = 3;
+                    inkCtx.lineCap = 'round';
+                    inkCtx.lineJoin = 'round';
+                    for (let i = 0; i < this.laserTrail.length - 1; i++) {
+                        const p1 = this.laserTrail[i];
+                        const p2 = this.laserTrail[i + 1];
+                        const opacity = 1 - ((now - p1.time) / 1000);
+                        inkCtx.globalAlpha = Math.max(0, opacity);
+                        inkCtx.beginPath(); inkCtx.moveTo(p1.x, p1.y); inkCtx.lineTo(p2.x, p2.y);
+                        inkCtx.stroke();
                     }
-                    ctx.stroke();
-
-                    // glowing tip
-                    const last = this.laserTrail[this.laserTrail.length - 1];
-                    ctx.beginPath();
-                    ctx.arc(last.x, last.y, 5, 0, Math.PI * 2);
-                    ctx.fillStyle = '#ff3b30';
-                    ctx.fill();
-                    ctx.shadowBlur = 0;
+                    inkCtx.globalAlpha = 1;
                 }
+                // Request next frame for laser fade
+                requestAnimationFrame(() => this.render());
             }
         });
-
-        requestAnimationFrame(() => this.render());
     }
 
+    renderOverlays(ctx, index) {
+        if (this.lassoPath) {
+            ctx.beginPath(); ctx.setLineDash([5, 5]); ctx.strokeStyle = '#007aff'; ctx.lineWidth = 1;
+            this.lassoPath.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+            ctx.stroke(); ctx.setLineDash([]);
+            if (!this.isLassoing) { ctx.fillStyle = 'rgba(0, 122, 255, 0.05)'; ctx.fill(); }
+        }
+        if (this.selectedStrokes.length > 0) {
+            const bounds = this.getSelectionBounds();
+            if (bounds) {
+                ctx.strokeStyle = '#007aff'; ctx.setLineDash([5, 5]); ctx.lineWidth = 1;
+                ctx.strokeRect(bounds.x, bounds.y, bounds.w, bounds.h);
+                ctx.setLineDash([]); ctx.fillStyle = 'white'; ctx.beginPath();
+                ctx.arc(bounds.x + bounds.w, bounds.y + bounds.h, 6, 0, Math.PI * 2);
+                ctx.fill(); ctx.stroke();
+            }
+        }
+    }
 
+    drawDotsTo(ctx, w, h) {
+        ctx.fillStyle = '#ccc';
+        for (let x = 30; x < w; x += 30) {
+            for (let y = 30; y < h; y += 30) {
+                ctx.beginPath(); ctx.arc(x, y, 1, 0, Math.PI * 2); ctx.fill();
+            }
+        }
+    }
+
+    drawGridTo(ctx, w, h) {
+        ctx.strokeStyle = '#e0e0e0'; ctx.lineWidth = 0.5; ctx.beginPath();
+        for (let x = 30; x < w; x += 30) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+        for (let y = 30; y < h; y += 30) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+        ctx.stroke();
+    }
 
     showLassoMenu(x, y, isPasteMode = false) {
         let menu = document.getElementById('lasso-menu');
-        const hasClipboard = !!this.clipboard;
+        if (!menu) { menu = document.createElement('div'); menu.id = 'lasso-menu'; document.body.appendChild(menu); }
+        menu.innerHTML = isPasteMode ? `<button id="lasso-paste">Paste</button>` : `
+            <button id="lasso-cut">Cut</button> <button id="lasso-copy">Copy</button>
+            <button id="lasso-duplicate">Duplicate</button> <button id="lasso-delete" style="color:red">Delete</button>`;
 
-        if (!menu) {
-            menu = document.createElement('div');
-            menu.id = 'lasso-menu';
-            document.body.appendChild(menu);
-        }
-
-        // Re-render menu content based on mode
-        let html = '';
-        if (isPasteMode) {
-            html = `<button id="lasso-paste">Paste</button>`;
-        } else {
-            html = `
-                <button id="lasso-cut">Cut</button>
-                <button id="lasso-copy">Copy</button>
-                <button id="lasso-duplicate">Duplicate</button>
-                <button id="lasso-delete" style="color:red">Delete</button>
-            `;
-            if (hasClipboard) {
-                html += `<div style="height:1px;background:#eee;margin:2px 0"></div><button id="lasso-paste">Paste</button>`;
-            }
-        }
-        menu.innerHTML = html;
-
-        // Attach Listeners
-        const btnCut = menu.querySelector('#lasso-cut');
-        if (btnCut) btnCut.onclick = () => {
-            this.copySelection();
-            this.deleteSelection();
-            menu.classList.add('hidden');
-        };
-
-        const btnCopy = menu.querySelector('#lasso-copy');
-        if (btnCopy) btnCopy.onclick = () => {
-            this.copySelection();
-            menu.classList.add('hidden');
-        };
-
-        const btnDuplicate = menu.querySelector('#lasso-duplicate');
-        if (btnDuplicate) btnDuplicate.onclick = () => {
-            this.duplicateSelection();
-            menu.classList.add('hidden');
-        };
-
-        const btnDelete = menu.querySelector('#lasso-delete');
-        if (btnDelete) btnDelete.onclick = () => {
-            this.pushUndo(this.currentPageIndex, this.preInteractionState);
-            this.deleteSelection();
-            this.saveNotes();
-            menu.classList.add('hidden');
-        };
-
-        const btnPaste = menu.querySelector('#lasso-paste');
-        if (btnPaste) btnPaste.onclick = () => {
-            this.pushUndo(this.currentPageIndex, this.preInteractionState);
-            this.pasteSelection(x, y);
-            this.saveNotes();
+        menu.onclick = (e) => {
+            const btn = e.target;
+            if (btn.id === 'lasso-cut') this.cutSelection();
+            if (btn.id === 'lasso-copy') this.copySelection();
+            if (btn.id === 'lasso-duplicate') this.duplicateSelection();
+            if (btn.id === 'lasso-delete') this.deleteSelection();
+            if (btn.id === 'lasso-paste') this.pasteSelection(this.lastCoords);
             menu.classList.add('hidden');
         };
 
         menu.classList.remove('hidden');
-        const menuWidth = 120;
-        if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
-        menu.style.left = x + 'px';
-        menu.style.top = (y - (isPasteMode ? 20 : 50)) + 'px';
-    }
-
-    pasteSelection(screenX, screenY) {
-        if (!this.clipboard) return;
-        try {
-            const pastedStrokes = JSON.parse(this.clipboard);
-            if (!Array.isArray(pastedStrokes) || pastedStrokes.length === 0) return;
-
-            // Calculate center of pasted strokes
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            pastedStrokes.forEach(s => {
-                const points = s.points || (s.x !== undefined ? [{ x: s.x, y: s.y }, { x: s.x + (s.w || 0), y: s.y + (s.h || 0) }] : []);
-                points.forEach(p => {
-                    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-                    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
-                });
-            });
-            const centerX = (minX + maxX) / 2;
-            const centerY = (minY + maxY) / 2;
-
-            const rect = this.activeCanvas.getBoundingClientRect();
-            const scaleX = this.activeCanvas.offsetWidth / rect.width;
-            const scaleY = this.activeCanvas.offsetHeight / rect.height;
-
-            const targetX = (screenX - rect.left) * scaleX;
-            const targetY = (screenY - rect.top) * scaleY;
-
-            const offsetX = targetX - centerX;
-            const offsetY = targetY - centerY;
-
-            // Apply Offset and Clone
-            // We need to deep clone or ensure we don't modify the clipboard if we paste again
-            // JSON.parse already created a new object structure.
-
-            pastedStrokes.forEach(s => {
-                if (s.points) {
-                    s.points.forEach(p => { p.x += offsetX; p.y += offsetY; });
-                }
-                if (s.x !== undefined) s.x += offsetX;
-                if (s.y !== undefined) s.y += offsetY;
-            });
-
-            this.currentPage.strokes.push(...pastedStrokes);
-            this.selectedStrokes = pastedStrokes;
-            const b = this.getSelectionBounds();
-            if (b) {
-                this.lassoPath = [
-                    { x: b.x, y: b.y }, { x: b.x + b.w, y: b.y },
-                    { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h },
-                    { x: b.x, y: b.y }
-                ];
-            }
-            this.render();
-        } catch (e) { console.error("Paste error", e); }
-    }
-
-    deleteSelection() {
-        this.currentPage.strokes = this.currentPage.strokes.filter(s => !this.selectedStrokes.includes(s));
-        this.selectedStrokes = [];
-        this.lassoPath = null;
-        this.render();
+        menu.style.left = x + 'px'; menu.style.top = y + 'px';
     }
 
     duplicateSelection() {
         if (this.selectedStrokes.length === 0) return;
-
-        // Save undo state
-        const preState = JSON.stringify(this.currentPage.strokes);
-
-        this.clipboard = JSON.stringify(this.selectedStrokes);
-        // Paste at slightly offset location
-        const bounds = this.getSelectionBounds();
-        if (!bounds) return;
-
-        const rect = this.activeCanvas.getBoundingClientRect();
-        // Calculate center of selection
-        const centerX = bounds.x + bounds.w / 2;
-        const centerY = bounds.y + bounds.h / 2;
-
-        // Target screen position: same as selection but offset by 20px
-        const scaleX = rect.width / this.activeCanvas.offsetWidth;
-        const scaleY = rect.height / this.activeCanvas.offsetHeight;
-
-        const screenX = rect.left + (centerX + 20) * scaleX;
-        const screenY = rect.top + (centerY + 20) * scaleY;
-
-        this.pasteSelection(screenX, screenY);
-        this.pushUndo(this.currentPageIndex, preState);
+        this.pushUndo(this.currentPageIndex, JSON.stringify(this.currentPage.strokes));
+        const newStrokes = JSON.parse(JSON.stringify(this.selectedStrokes));
+        newStrokes.forEach(s => {
+            if (s.type === 'text' || s.type === 'image') {
+                s.x += 20; s.y += 20;
+            } else {
+                s.points.forEach(p => { p.x += 20; p.y += 20; });
+            }
+            this.currentPage.strokes.push(s);
+        });
+        this.selectedStrokes = newStrokes;
+        this.render();
         this.saveNotes();
     }
 
-    copySelection() {
-        // Simple clipboard simulation
-        this.clipboard = JSON.stringify(this.selectedStrokes);
-        localStorage.setItem('luminote_v3_clipboard', this.clipboard);
-        // Prompt user?
-        const btn = document.querySelector('.tool-btn[data-tool="lasso"]');
-        if (btn) {
-            const originalText = btn.innerHTML;
-            btn.innerHTML = '✅';
-            setTimeout(() => btn.innerHTML = originalText, 1000);
-        }
+    cutSelection() {
+        this.copySelection();
+        this.deleteSelection();
+    }
+
+    pasteSelection(coords) {
+        if (!this.clipboard) return;
+        this.pushUndo(this.currentPageIndex, JSON.stringify(this.currentPage.strokes));
+        const strokes = JSON.parse(this.clipboard);
+        // Recalculate center
+        let minX = Infinity, minY = Infinity;
+        strokes.forEach(s => {
+            if (s.type === 'text' || s.type === 'image') { minX = Math.min(minX, s.x); minY = Math.min(minY, s.y); }
+            else s.points.forEach(p => { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); });
+        });
+        const dx = (coords?.x || 100) - minX;
+        const dy = (coords?.y || 100) - minY;
+
+        strokes.forEach(s => {
+            if (s.type === 'text' || s.type === 'image') { s.x += dx; s.y += dy; }
+            else s.points.forEach(p => { p.x += dx; p.y += dy; });
+            this.currentPage.strokes.push(s);
+        });
+        this.render();
+        this.saveNotes();
+    }
+
+    copySelection() { this.clipboard = JSON.stringify(this.selectedStrokes); }
+    deleteSelection() {
+        this.currentPage.strokes = this.currentPage.strokes.filter(s => !this.selectedStrokes.includes(s));
+        this.selectedStrokes = []; this.lassoPath = null; this.render();
     }
 
     drawStroke(s) {
+        if (!s) return;
+
+        // Handle Non-Path Strokes
         if (s.type === 'text') {
-            this.ctx.fillStyle = s.color;
-            this.ctx.font = `${s.size}px Inter, sans-serif`;
+            this.ctx.fillStyle = s.color || '#000000';
+            this.ctx.font = `${s.size || 16}px Inter, sans-serif`;
             this.ctx.textBaseline = 'top';
-            this.ctx.fillText(s.text, s.x, s.y);
+            this.ctx.fillText(s.text || '', s.x, s.y);
             return;
         }
         if (s.type === 'image') {
@@ -1386,59 +1580,45 @@ class LumiNote {
         }
 
         const points = s.points;
+        if (!points || points.length === 0) return;
         const len = points.length;
-        if (len < 1) return;
-
-        // Setup Context
-        this.ctx.beginPath();
-        const isEraser = s.color === 'eraser';
-        const isHighlighter = s.tool === 'highlighter' || (s.opacity && s.opacity < 1 && !isEraser);
-
-        if (isEraser) {
-            this.ctx.strokeStyle = '#ffffff';
-            this.ctx.globalCompositeOperation = 'source-over';
-        } else if (isHighlighter) {
-            this.ctx.strokeStyle = s.color;
-            this.ctx.globalCompositeOperation = 'multiply'; // Real highlighter effect
-            // Fix for dark mode or black paper? Multiply makes it invisible on black.
-            // But standard paper is white.
-        } else {
-            this.ctx.strokeStyle = s.color;
-            this.ctx.globalCompositeOperation = 'source-over';
-        }
 
         this.ctx.lineWidth = s.width;
-        // Highlighter usually flat cap/round join or round/round
-        this.ctx.lineCap = isHighlighter ? 'butt' : 'round';
+        this.ctx.lineCap = 'round';
         this.ctx.lineJoin = 'round';
-        this.ctx.globalAlpha = s.opacity;
+        this.ctx.strokeStyle = s.color === 'eraser' ? '#ffffff' : s.color;
+        this.ctx.globalAlpha = s.opacity || 1;
 
+        // Force maximum smoothing quality for organic curves
+        this.ctx.imageSmoothingEnabled = true;
+        this.ctx.imageSmoothingQuality = 'high';
+
+        this.ctx.beginPath();
         if (len === 1) {
             this.ctx.arc(points[0].x, points[0].y, s.width / 2, 0, Math.PI * 2);
             this.ctx.fill();
+        } else if (s.isShape) {
+            // SHARP RENDERING for geometric shapes (Rectangle, Triangle, Square, etc.)
+            this.ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < len; i++) {
+                this.ctx.lineTo(points[i].x, points[i].y);
+            }
+            this.ctx.stroke();
         } else {
             this.ctx.moveTo(points[0].x, points[0].y);
-
             if (len === 2) {
                 this.ctx.lineTo(points[1].x, points[1].y);
             } else {
                 let i;
                 for (i = 1; i < len - 2; i++) {
-                    const c = {
-                        x: (points[i].x + points[i + 1].x) / 2,
-                        y: (points[i].y + points[i + 1].y) / 2
-                    };
+                    const c = { x: (points[i].x + points[i + 1].x) / 2, y: (points[i].y + points[i + 1].y) / 2 };
                     this.ctx.quadraticCurveTo(points[i].x, points[i].y, c.x, c.y);
                 }
-                // For the last 2 points
                 this.ctx.quadraticCurveTo(points[i].x, points[i].y, points[i + 1].x, points[i + 1].y);
             }
             this.ctx.stroke();
         }
-
-        // Reset Context
-        this.ctx.globalAlpha = 1.0;
-        this.ctx.globalCompositeOperation = 'source-over';
+        this.ctx.globalAlpha = 1;
     }
 
     drawDots(w, h) {
@@ -1468,57 +1648,896 @@ class LumiNote {
         // Placeholder to ensure deletion of old method if needed
     }
 
-    saveNotes() {
-        localStorage.setItem('luminote_v3_data', JSON.stringify(this.pages));
-        localStorage.setItem('luminote_v3_recent_imgs', JSON.stringify(this.recentImages));
+    triggerAutoSave() {
+        const status = document.getElementById('save-status');
+        if (status) {
+            status.innerText = 'Saving...';
+            status.style.opacity = '1';
+        }
+
+        if (this.autoSaveTimer) clearTimeout(this.autoSaveTimer);
+        this.autoSaveTimer = setTimeout(() => {
+            this.saveNotes();
+        }, 1000); // Debounce 1s
     }
 
-    savePresets() {
-        localStorage.setItem('luminote_v3_presets', JSON.stringify(this.presets));
+    async saveNotes() {
+        if (!this.store || !this.activeNotebookId) return;
+        try {
+            const notebookData = {
+                pages: this.pages,
+                lastModified: Date.now()
+            };
+            await this.store.set('note_' + this.activeNotebookId, notebookData);
+            await this.store.set('recent_imgs', this.recentImages);
+            console.log(`Notebook ${this.activeNotebookId} persisted.`);
+
+            const status = document.getElementById('save-status');
+            if (status) {
+                status.innerText = 'Saved';
+                setTimeout(() => { if (status.innerText === 'Saved') status.style.opacity = '0'; }, 2000);
+            }
+        } catch (e) {
+            console.error("Save failed:", e);
+            const status = document.getElementById('save-status');
+            if (status) status.innerText = 'Save Error';
+        }
     }
 
-    loadNotes() {
-        const data = localStorage.getItem('luminote_v3_data');
+    async savePresets() {
+        if (!this.store) return;
+        await this.store.set('presets', this.presets);
+    }
+
+    async loadNotes() {
+        // Obsolete in v6.6, logic moved to openNotebook
+    }
+
+    async loadLibraryIndex() {
+        const list = await this.store.get('lumi_notebooks_list');
+        this.notebooks = list || [];
+    }
+
+    async saveLibraryIndex() {
+        await this.store.set('lumi_notebooks_list', this.notebooks);
+    }
+
+    async loadSharedData() {
+        const recent = await this.store.get('recent_imgs');
+        if (recent) this.recentImages = recent;
+
+        const presets = await this.store.get('presets');
+        if (presets) this.presets = presets;
+
+        const openTabs = await this.store.get('open_tabs_list');
+        this.openNotebookIds = openTabs || [];
+    }
+
+    async openNotebook(id) {
+        if (this.activeNotebookId === id) {
+            this.closeLibrary();
+            this.renderTabs();
+            return;
+        }
+
+        if (this.activeNotebookId) await this.saveNotes();
+
+        const data = await this.store.get('note_' + id);
         if (data) {
-            try {
-                this.pages = JSON.parse(data);
-            } catch (e) {
-                console.error("Failed to parse notes", e);
+            this.pages = data.pages;
+            this.activeNotebookId = id;
+            if (!this.openNotebookIds.includes(id)) {
+                this.openNotebookIds.push(id);
             }
+            await this.store.set('last_active_id', id);
+            await this.store.set('open_tabs_list', this.openNotebookIds);
+
+            this.currentPageIndex = 0;
+            this.renderTabs();
+            this.setupPages();
+            this.render();
+            this.closeLibrary();
+        }
+    }
+
+    async createNotebook(name = "Untitled", parentId = null) {
+        const id = 'nb_' + Date.now();
+        const pid = parentId || (this.currentFolderId !== 'root' ? this.currentFolderId : null);
+        const newNotebook = {
+            id: id,
+            name: name,
+            type: 'notebook',
+            parentId: pid,
+            lastModified: Date.now()
+        };
+        this.notebooks.push(newNotebook);
+        await this.saveLibraryIndex();
+
+        const initialData = {
+            pages: [{ strokes: [], template: 'plain' }],
+            name: name
+        };
+        await this.store.set('note_' + id, initialData);
+        await this.openNotebook(id);
+    }
+
+    async createFolder(name = "New Folder") {
+        const id = 'fol_' + Date.now();
+        const folder = {
+            id: id,
+            name: name,
+            type: 'folder',
+            parentId: this.currentFolderId !== 'root' ? this.currentFolderId : null,
+            lastModified: Date.now()
+        };
+        this.notebooks.push(folder);
+        await this.saveLibraryIndex();
+        this.renderLibrary();
+    }
+
+    async deleteItem(id, type, e) {
+        if (e) e.stopPropagation();
+        if (!confirm(`Are you sure you want to delete this ${type}?`)) return;
+
+        if (type === 'folder') {
+            const children = this.notebooks.filter(n => n.parentId === id);
+            for (const child of children) {
+                await this.deleteItem(child.id, child.type);
+            }
+        } else {
+            await this.store.delete('note_' + id);
+            this.openNotebookIds = this.openNotebookIds.filter(tid => tid !== id);
+            await this.store.set('open_tabs_list', this.openNotebookIds);
         }
 
-        const recent = localStorage.getItem('luminote_v3_recent_imgs');
-        if (recent) {
-            try {
-                this.recentImages = JSON.parse(recent);
-            } catch (e) {
-                console.error("Failed to parse recent images", e);
-            }
-        }
+        this.notebooks = this.notebooks.filter(n => n.id !== id);
+        await this.saveLibraryIndex();
 
-        const presets = localStorage.getItem('luminote_v3_presets');
-        if (presets) {
-            try {
-                const parsed = JSON.parse(presets);
-                if (parsed.pen && Array.isArray(parsed.pen.sizes)) {
-                    this.presets = parsed;
+        if (this.activeNotebookId === id) {
+            if (this.openNotebookIds.length > 0) {
+                await this.openNotebook(this.openNotebookIds[0]);
+            } else {
+                this.activeNotebookId = null;
+                this.renderTabs();
+                this.openLibrary();
+            }
+        } else {
+            this.renderLibrary();
+            this.renderTabs();
+        }
+    }
+
+    renderTabs() {
+        const list = document.getElementById('tabs-list');
+        if (!list) return;
+        list.innerHTML = '';
+
+        this.openNotebookIds.forEach(id => {
+            const nb = this.notebooks.find(n => n.id === id);
+            if (!nb) return;
+
+            const tab = document.createElement('div');
+            tab.className = `tab ${id === this.activeNotebookId ? 'active' : ''}`;
+            tab.innerHTML = `
+                <span class="tab-title">${nb.name}</span>
+                <button class="tab-close" data-id="${id}">×</button>
+            `;
+            tab.onclick = () => this.openNotebook(id);
+
+            const closeBtn = tab.querySelector('.tab-close');
+            closeBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.closeTab(id);
+            };
+
+            list.appendChild(tab);
+        });
+    }
+
+    async closeTab(id) {
+        this.openNotebookIds = this.openNotebookIds.filter(tid => tid !== id);
+        await this.store.set('open_tabs_list', this.openNotebookIds);
+
+        if (this.activeNotebookId === id) {
+            if (this.openNotebookIds.length > 0) {
+                await this.openNotebook(this.openNotebookIds[0]);
+            } else if (this.notebooks.length > 0) {
+                await this.openNotebook(this.notebooks[0].id);
+            } else {
+                this.currentPageIndex = 0;
+                this.pages = [{ strokes: [], template: 'plain' }];
+                this.activeNotebookId = null;
+                this.renderTabs();
+                this.setupPages();
+                this.render();
+                this.openLibrary();
+            }
+        } else {
+            this.renderTabs();
+        }
+    }
+
+    openLibrary() {
+        const lib = document.getElementById('library-view');
+        lib.classList.remove('hidden');
+        this.renderLibrary();
+    }
+
+    closeLibrary() {
+        const lib = document.getElementById('library-view');
+        lib.classList.add('hidden');
+    }
+
+    async toggleFavorite(id, e) {
+        if (e) e.stopPropagation();
+        const item = this.notebooks.find(n => n.id === id);
+        if (item) {
+            item.favorite = !item.favorite;
+            await this.saveLibraryIndex();
+            this.renderLibrary();
+        }
+    }
+
+    async renameItem(id, type, e) {
+        if (e) e.stopPropagation();
+        const item = this.notebooks.find(n => n.id === id);
+        if (!item) return;
+
+        const newName = prompt(`Rename ${type}:`, item.name);
+        if (newName && newName !== item.name) {
+            item.name = newName;
+            item.lastModified = Date.now();
+            await this.saveLibraryIndex();
+
+            if (type === 'notebook') {
+                const data = await this.store.get('note_' + id);
+                if (data) {
+                    data.name = newName;
+                    await this.store.set('note_' + id, data);
                 }
-            } catch (e) {
-                console.error("Failed to parse presets", e);
             }
+            this.renderLibrary();
+            this.renderTabs();
+        }
+    }
+
+    async moveItem(id, type, e) {
+        if (e) e.stopPropagation();
+        this.movingItemId = id;
+        this.openMovePicker();
+    }
+
+    openMovePicker() {
+        const modal = document.getElementById('move-modal');
+        if (modal) modal.classList.remove('hidden');
+        this.renderMovePicker();
+    }
+
+    closeMovePicker() {
+        const modal = document.getElementById('move-modal');
+        if (modal) modal.classList.add('hidden');
+        this.movingItemId = null;
+    }
+
+    renderMovePicker() {
+        const list = document.getElementById('move-folder-list');
+        if (!list) return;
+        list.innerHTML = '';
+
+        const itemToMove = this.notebooks.find(n => n.id === this.movingItemId);
+        if (!itemToMove) return;
+
+        // 1. Root/Home Option
+        const rootBtn = document.createElement('button');
+        rootBtn.className = 'nav-item';
+        rootBtn.style.textAlign = 'left';
+        rootBtn.style.width = '100%';
+        rootBtn.innerHTML = `🏠 Home (Root level)`;
+        rootBtn.onclick = () => this.executeMove(null);
+        list.appendChild(rootBtn);
+
+        // 2. Folders
+        const folders = this.notebooks.filter(f => {
+            if (f.type !== 'folder') return false;
+            if (f.id === this.movingItemId) return false;
+            return true;
+        });
+
+        folders.forEach(f => {
+            const btn = document.createElement('button');
+            btn.className = 'nav-item';
+            btn.style.textAlign = 'left';
+            btn.style.width = '100%';
+            btn.innerHTML = `<div class="premium-icon icon-folder" style="width:16px; height:12px; transform: scale(0.8); display:inline-block; margin-right:8px;"></div> ${f.name}`;
+            btn.onclick = () => this.executeMove(f.id);
+            list.appendChild(btn);
+        });
+    }
+
+    async executeMove(targetId) {
+        const item = this.notebooks.find(n => n.id === this.movingItemId);
+        if (item) {
+            item.parentId = targetId;
+            item.lastModified = Date.now();
+            await this.saveLibraryIndex();
+            this.renderLibrary();
+        }
+        this.closeMovePicker();
+    }
+
+    async setItemColor(color) {
+        const item = this.notebooks.find(n => n.id === this.selectedMenuId);
+        if (item) {
+            item.color = color;
+            await this.saveLibraryIndex();
+            this.renderLibrary();
+
+            // Highlight active in UI
+            document.querySelectorAll('.color-option').forEach(opt => {
+                opt.classList.toggle('active', opt.dataset.color === color);
+            });
+        }
+    }
+
+    openActionMenu(id, type, e) {
+        if (e) e.stopPropagation();
+        this.selectedMenuId = id;
+        const item = this.notebooks.find(n => n.id === id);
+        if (!item) return;
+
+        document.getElementById('action-menu-title').textContent = `${item.name} Options`;
+        document.getElementById('menu-fav-btn').textContent = item.favorite ? '⭐ Unfavorite' : '☆ Favorite';
+
+        // Highlight current color
+        const currentColor = item.color || 'default';
+        document.querySelectorAll('.color-option').forEach(opt => {
+            opt.classList.toggle('active', opt.dataset.color === currentColor);
+        });
+
+        const modal = document.getElementById('action-menu-modal');
+        modal.classList.remove('hidden');
+    }
+
+    closeActionMenu() {
+        document.getElementById('action-menu-modal').classList.add('hidden');
+        this.selectedMenuId = null;
+    }
+
+    renderLibrary() {
+        const grid = document.getElementById('notebook-grid');
+        if (!grid) return;
+
+        grid.innerHTML = '';
+        grid.className = this.viewMode === 'grid' ? 'notebook-grid' : 'notebook-list';
+
+        this.renderBreadcrumbs();
+        this.renderSidebarFolders();
+
+        let items = this.notebooks;
+
+        // 1. Filter by category
+        if (this.libraryCategory === 'recent') {
+            items = [...items].sort((a, b) => b.lastModified - a.lastModified).slice(0, 8);
+        } else if (this.libraryCategory === 'favorites') {
+            items = items.filter(n => n.favorite);
+        } else {
+            items = items.filter(n => (n.parentId || 'root') === (this.currentFolderId === 'root' ? 'root' : this.currentFolderId));
         }
 
-        const clipboard = localStorage.getItem('luminote_v3_clipboard');
-        if (clipboard) {
-            this.clipboard = clipboard;
+        // 2. Filter by Search
+        if (this.searchQuery) {
+            items = items.filter(n => n.name.toLowerCase().includes(this.searchQuery.toLowerCase()));
         }
 
-        // Final sync of tool state
-        const current = this.presets[this.tool] || this.presets.pen;
-        this.lineWidth = current.sizes[current.activeIndex] || 2;
-        this.color = current.color || '#000000';
+        // 3. Sort
+        if (this.sortBy === 'name') {
+            items.sort((a, b) => a.name.localeCompare(b.name));
+        } else {
+            items.sort((a, b) => b.lastModified - a.lastModified);
+        }
 
+        // 4. Render add card in grid mode
+        if (this.viewMode === 'grid' && this.libraryCategory === 'all') {
+            const addCard = document.createElement('div');
+            addCard.className = 'notebook-card add-card';
+            addCard.innerHTML = `
+                <div class="card-thumb">
+                    <div class="premium-icon icon-notebook" style="opacity:0.2;"></div>
+                    <span style="position:absolute; font-size:32px; color:#c7c7cc; font-weight:300;">+</span>
+                </div>
+                <div class="card-title">New Note</div>
+            `;
+            addCard.onclick = () => this.createNotebook(`Note ${Date.now().toString().slice(-4)}`);
+            grid.appendChild(addCard);
+        }
+
+        items.forEach(item => {
+            const isFolder = item.type === 'folder';
+            const iconClass = isFolder ? 'icon-folder' : 'icon-notebook';
+            const colorClass = item.color && item.color !== 'default' ? `color-${item.color}` : '';
+
+            if (this.viewMode === 'grid') {
+                const card = document.createElement('div');
+                card.className = 'notebook-card';
+                card.innerHTML = `
+                    <button class="card-more-btn">•••</button>
+                    <div class="card-thumb"><div class="premium-icon ${iconClass} ${colorClass}"></div></div>
+                    <div class="card-title">${item.name}</div>
+                `;
+                card.onclick = () => isFolder ? this.navigateToFolder(item.id) : this.openNotebook(item.id);
+                card.querySelector('.card-more-btn').onclick = (e) => this.openActionMenu(item.id, item.type, e);
+                grid.appendChild(card);
+            } else {
+                const row = document.createElement('div');
+                row.className = 'list-item';
+                row.innerHTML = `
+                    <div class="item-icon"><div class="premium-icon ${iconClass} ${colorClass}"></div></div>
+                    <div class="item-info">
+                        <div class="item-title">${item.name}</div>
+                        <div class="item-meta">${new Date(item.lastModified).toLocaleDateString()}</div>
+                    </div>
+                    <button class="card-more-btn" style="position:relative;">•••</button>
+                `;
+                row.onclick = () => isFolder ? this.navigateToFolder(item.id) : this.openNotebook(item.id);
+                row.querySelector('.card-more-btn').onclick = (e) => this.openActionMenu(item.id, item.type, e);
+                grid.appendChild(row);
+            }
+        });
+    }
+
+    renderSidebarFolders() {
+        const list = document.getElementById('sidebar-folder-list');
+        if (!list) return;
+        list.innerHTML = '';
+
+        const folders = this.notebooks.filter(n => n.type === 'folder');
+        folders.forEach(f => {
+            const btn = document.createElement('button');
+            btn.className = `nav-item ${this.currentFolderId === f.id ? 'active' : ''}`;
+            btn.style.display = 'flex';
+            btn.style.alignItems = 'center';
+            btn.style.gap = '8px';
+            const colorClass = f.color && f.color !== 'default' ? `color-${f.color}` : '';
+            btn.innerHTML = `<div class="premium-icon icon-folder ${colorClass}" style="width:16px; height:12px; transform: scale(0.8);"></div> <span>${f.name}</span>`;
+            btn.onclick = () => {
+                this.libraryCategory = 'all';
+                this.navigateToFolder(f.id);
+            };
+            list.appendChild(btn);
+        });
+    }
+
+
+    renderBreadcrumbs() {
+        const crumbs = document.getElementById('library-breadcrumbs');
+        crumbs.innerHTML = '';
+
+        let path = [{ id: 'root', name: 'Notebooks' }];
+        if (this.currentFolderId !== 'root') {
+            let curr = this.notebooks.find(n => n.id === this.currentFolderId);
+            let folderPath = [];
+            while (curr) {
+                folderPath.unshift(curr);
+                curr = this.notebooks.find(n => n.id === curr.parentId);
+            }
+            path = path.concat(folderPath);
+        }
+
+        path.forEach((p, i) => {
+            const span = document.createElement('span');
+            span.className = 'breadcrumb-item';
+            span.textContent = p.name;
+            if (i < path.length - 1) {
+                span.onclick = () => this.navigateToFolder(p.id);
+                const slash = document.createElement('span');
+                slash.textContent = ' / ';
+                crumbs.appendChild(span);
+                crumbs.appendChild(slash);
+            } else {
+                crumbs.appendChild(span);
+            }
+        });
+    }
+
+    navigateToFolder(id) {
+        this.currentFolderId = id;
+        this.renderLibrary();
+    }
+
+    setupLibraryListeners() {
+        const backBtn = document.querySelector('.back-btn');
+        if (backBtn) backBtn.onclick = () => this.openLibrary();
+
+        const closeLibBtn = document.getElementById('close-library-btn');
+        if (closeLibBtn) closeLibBtn.onclick = () => this.closeLibrary();
+
+        const closeMoveBtn = document.getElementById('close-move-modal-btn');
+        if (closeMoveBtn) closeMoveBtn.onclick = () => this.closeMovePicker();
+
+        const closeActionMenuBtn = document.getElementById('close-action-menu-btn');
+        if (closeActionMenuBtn) closeActionMenuBtn.onclick = () => this.closeActionMenu();
+
+        document.getElementById('menu-fav-btn').onclick = () => {
+            this.toggleFavorite(this.selectedMenuId);
+            this.closeActionMenu();
+        };
+        document.getElementById('menu-rename-btn').onclick = () => {
+            const item = this.notebooks.find(n => n.id === this.selectedMenuId);
+            this.renameItem(this.selectedMenuId, item.type);
+            this.closeActionMenu();
+        };
+        document.getElementById('menu-move-btn').onclick = () => {
+            const item = this.notebooks.find(n => n.id === this.selectedMenuId);
+            this.moveItem(this.selectedMenuId, item.type);
+            this.closeActionMenu();
+        };
+        document.getElementById('menu-delete-btn').onclick = () => {
+            const item = this.notebooks.find(n => n.id === this.selectedMenuId);
+            this.deleteItem(this.selectedMenuId, item.type);
+            this.closeActionMenu();
+        };
+
+        document.querySelectorAll('.color-option').forEach(opt => {
+            opt.onclick = () => this.setItemColor(opt.dataset.color);
+        });
+
+        const newFolderBtn = document.getElementById('new-folder-btn');
+        if (newFolderBtn) newFolderBtn.onclick = () => {
+            const name = prompt("Enter Folder Name:", "New Folder");
+            if (name) this.createFolder(name);
+        };
+
+        const viewToggleBtn = document.getElementById('view-toggle-btn');
+        if (viewToggleBtn) viewToggleBtn.onclick = (e) => {
+            this.viewMode = this.viewMode === 'grid' ? 'list' : 'grid';
+            e.target.textContent = this.viewMode === 'grid' ? 'List View' : 'Grid View';
+            this.renderLibrary();
+        };
+
+        const searchInput = document.getElementById('lib-search-input');
+        if (searchInput) {
+            searchInput.oninput = (e) => {
+                this.searchQuery = e.target.value;
+                this.renderLibrary();
+            };
+        }
+
+        const sortSelect = document.getElementById('lib-sort-select');
+        if (sortSelect) {
+            sortSelect.onchange = (e) => {
+                this.sortBy = e.target.value;
+                this.renderLibrary();
+            };
+        }
+
+        const navItems = document.querySelectorAll('.library-sidebar .nav-item[data-view]');
+        navItems.forEach(item => {
+            item.onclick = (e) => {
+                navItems.forEach(btn => btn.classList.remove('active'));
+                e.target.classList.add('active');
+                this.libraryCategory = e.target.dataset.view;
+                if (this.libraryCategory === 'all') this.currentFolderId = 'root';
+                this.renderLibrary();
+            };
+        });
+
+        const addTabBtn = document.getElementById('add-notebook-tab-btn');
+        if (addTabBtn) addTabBtn.onclick = () => this.createNotebook(`Note ${Date.now().toString().slice(-4)}`);
+
+        // Pages Sidebar close handlers
+        const closeSidebarBtn = document.getElementById('close-pages-sidebar-btn');
+        if (closeSidebarBtn) closeSidebarBtn.onclick = () => this.closePagesOverview();
+    }
+
+    openPagesOverview() {
+        console.log('📑 openPagesOverview called (v9.1)');
+        const sidebar = document.getElementById('pages-sidebar');
+
+        if (!sidebar) {
+            alert('Critical Error: Sidebar ID not found in DOM');
+            return;
+        }
+
+        // Force visibility styles
+        sidebar.style.display = 'flex';
+        sidebar.style.zIndex = '200000'; // Extreme z-index
+
+        // Toggle hidden class
+        if (sidebar.classList.contains('hidden')) {
+            console.log('📑 Showing Sidebar');
+            sidebar.classList.remove('hidden');
+            try {
+                this.renderPagesOverview();
+            } catch (e) {
+                console.error('Render error:', e);
+                alert('Render error: ' + e.message);
+            }
+        } else {
+            console.log('📑 Hiding Sidebar');
+            sidebar.classList.add('hidden');
+        }
+    }
+
+    closePagesOverview() {
+        const sidebar = document.getElementById('pages-sidebar');
+        if (sidebar) sidebar.classList.add('hidden');
+    }
+
+    renderPagesOverview() {
+        // Find grid inside CSS class .pages-sidebar-grid
+        const grid = document.getElementById('pages-grid');
+        console.log('Sidebar Grid element:', grid);
+
+        if (!grid) {
+            console.error('❌ Sidebar Grid not found!');
+            return;
+        }
+
+        console.log(`📄 Rendering ${this.pages.length} pages`);
+        grid.innerHTML = '';
+
+        this.pages.forEach((page, index) => {
+            const card = document.createElement('div');
+            card.className = 'page-thumbnail-card';
+            card.draggable = true;
+            card.dataset.pageIndex = index;
+            if (index === this.currentPageIndex) card.classList.add('current-page');
+
+            // Create thumbnail preview
+            const preview = document.createElement('div');
+            preview.className = 'page-thumbnail-preview';
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 841;
+            canvas.height = 1189;
+            const ctx = canvas.getContext('2d');
+
+            // Draw background
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, 841, 1189);
+
+            // Draw PDF background if exists
+            if (page.pdfBackground && page._pdfImageCache) {
+                const img = page._pdfImageCache;
+                if (img.complete && img.naturalWidth > 0) {
+                    ctx.drawImage(img, 0, 0, 841, 1189);
+                }
+            }
+
+            // Draw template
+            if (page.template === 'dotted') this.drawDotsTo(ctx, 841, 1189);
+            else if (page.template === 'grid') this.drawGridTo(ctx, 841, 1189);
+
+            // Draw strokes (simplified)
+            page.strokes.forEach(stroke => {
+                if (stroke.type === 'pen' || stroke.type === 'highlighter') {
+                    ctx.strokeStyle = stroke.color || '#000';
+                    ctx.lineWidth = (stroke.lineWidth || 2) * 0.5; // Scale down for thumbnail
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+                    if (stroke.type === 'highlighter') ctx.globalAlpha = 0.3;
+
+                    ctx.beginPath();
+                    stroke.points.forEach((p, i) => {
+                        if (i === 0) ctx.moveTo(p.x, p.y);
+                        else ctx.lineTo(p.x, p.y);
+                    });
+                    ctx.stroke();
+                    ctx.globalAlpha = 1;
+                }
+            });
+
+            preview.appendChild(canvas);
+
+            // Create info section
+            const info = document.createElement('div');
+            info.className = 'page-thumbnail-info';
+
+            const number = document.createElement('div');
+            number.className = 'page-thumbnail-number';
+            number.textContent = `Page ${index + 1}`;
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'page-thumbnail-delete';
+            deleteBtn.textContent = 'Delete';
+            deleteBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.deletePage(index);
+            };
+
+            info.appendChild(number);
+            info.appendChild(deleteBtn);
+
+            card.appendChild(preview);
+            card.appendChild(info);
+
+            // Drag and drop handlers
+            card.ondragstart = (e) => {
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', index);
+                card.classList.add('dragging');
+            };
+
+            card.ondragend = () => {
+                card.classList.remove('dragging');
+                document.querySelectorAll('.page-thumbnail-card').forEach(c => c.classList.remove('drag-over'));
+            };
+
+            card.ondragover = (e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                card.classList.add('drag-over');
+            };
+
+            card.ondragleave = () => {
+                card.classList.remove('drag-over');
+            };
+
+            card.ondrop = (e) => {
+                e.preventDefault();
+                card.classList.remove('drag-over');
+                const fromIndex = parseInt(e.dataTransfer.getData('text/plain'));
+                const toIndex = index;
+                if (fromIndex !== toIndex) {
+                    this.reorderPage(fromIndex, toIndex);
+                }
+            };
+
+            // Click to navigate
+            card.onclick = () => {
+                this.currentPageIndex = index;
+                this.closePagesOverview();
+                this.render();
+                this.updatePageIndicator();
+            };
+
+            grid.appendChild(card);
+        });
+    }
+
+    reorderPage(fromIndex, toIndex) {
+        const page = this.pages.splice(fromIndex, 1)[0];
+        this.pages.splice(toIndex, 0, page);
+
+        // Update current page index if needed
+        if (this.currentPageIndex === fromIndex) {
+            this.currentPageIndex = toIndex;
+        } else if (fromIndex < this.currentPageIndex && toIndex >= this.currentPageIndex) {
+            this.currentPageIndex--;
+        } else if (fromIndex > this.currentPageIndex && toIndex <= this.currentPageIndex) {
+            this.currentPageIndex++;
+        }
+
+        this.saveNotes();
+        this.setupPages();
+        this.render();
+        this.renderPagesOverview();
+    }
+
+    deletePage(index) {
+        if (this.pages.length === 1) {
+            alert('Cannot delete the last page');
+            return;
+        }
+
+        if (!confirm(`Delete page ${index + 1}?`)) return;
+
+        this.pages.splice(index, 1);
+
+        // Adjust current page index
+        if (this.currentPageIndex >= this.pages.length) {
+            this.currentPageIndex = this.pages.length - 1;
+        } else if (this.currentPageIndex > index) {
+            this.currentPageIndex--;
+        }
+
+        this.saveNotes();
+        this.setupPages();
+        this.render();
+        this.renderPagesOverview();
         this.updatePageIndicator();
+    }
+
+    async importPDF(files) {
+        const fileList = files instanceof FileList ? Array.from(files) : [files];
+        if (fileList.length === 0) return;
+
+        // Show loading feedback immediately
+        const loadingAlert = document.createElement('div');
+        loadingAlert.style = "position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.8); color:white; padding:20px 40px; border-radius:12px; z-index:10000; font-weight:600;";
+        loadingAlert.textContent = "Processing PDF... Please wait";
+        document.body.appendChild(loadingAlert);
+
+        try {
+            if (typeof pdfjsLib === 'undefined') throw new Error('PDF.js library not found - please refresh');
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+            for (const file of fileList) {
+                console.log('📄 Processing:', file.name);
+
+                // If no notebook is active, create a new one for this PDF
+                let createdNew = false;
+                if (!this.activeNotebookId) {
+                    const id = 'nb_' + Date.now();
+                    const newEntry = {
+                        id: id,
+                        name: file.name.replace('.pdf', ''),
+                        type: 'notebook',
+                        parentId: this.currentFolderId === 'root' ? null : this.currentFolderId,
+                        lastModified: Date.now()
+                    };
+                    this.notebooks.push(newEntry);
+                    this.activeNotebookId = id;
+                    this.pages = []; // Reset pages to import PDF as content
+                    createdNew = true;
+                    console.log('✨ Created new notebook for PDF:', id);
+                }
+
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const img = await this.renderPDFPage(page);
+                    this.pages.push({
+                        strokes: [],
+                        template: 'plain',
+                        pdfBackground: img
+                    });
+                }
+
+                if (createdNew) {
+                    await this.saveLibraryIndex();
+                    this.closeLibrary();
+                }
+            }
+
+            await this.saveNotes();
+            this.setupPages();
+            this.render();
+
+            loadingAlert.textContent = "Import Complete! 🎉";
+            setTimeout(() => loadingAlert.remove(), 1500);
+
+        } catch (error) {
+            console.error('❌ PDF Error:', error);
+            loadingAlert.style.background = "#ff3b30";
+            loadingAlert.textContent = "Import Failed: Invalid File";
+            setTimeout(() => loadingAlert.remove(), 3000);
+            alert("Could not import PDF. Please ensure it is a valid PDF file.");
+        }
+    }
+
+    async renderPDFPage(pdfPage) {
+        try {
+            // Optimized Quality: Scale 2.5 provides crisp retina-level detail without crashing mobile browsers
+            const viewport = pdfPage.getViewport({ scale: 2.5 });
+            console.log(`Rendering PDF page at Optimized Quality: ${viewport.width}x${viewport.height}`);
+
+            // Create temporary canvas for PDF rendering
+            const tempCanvas = document.createElement('canvas');
+            const context = tempCanvas.getContext('2d', {
+                alpha: false,
+                willReadFrequently: false
+            });
+            tempCanvas.width = viewport.width;
+            tempCanvas.height = viewport.height;
+
+            // Render PDF page to canvas
+            await pdfPage.render({
+                canvasContext: context,
+                viewport: viewport,
+                intent: 'display'
+            }).promise;
+
+            // Convert to data URL
+            const dataURL = tempCanvas.toDataURL('image/png', 0.8);
+            console.log(`PDF page rendered successfully, data URL length: ${dataURL.length}`);
+            return dataURL;
+        } catch (error) {
+            console.error('Error rendering PDF page:', error);
+            throw error;
+        }
     }
 
     updatePageIndicator() {
@@ -1529,4 +2548,7 @@ class LumiNote {
     }
 }
 
-window.addEventListener('load', () => new LumiNote());
+window.addEventListener('load', () => {
+    window.lumiNoteApp = new LumiNote();
+    console.log('✅ LumiNote app initialized and exposed to window');
+});
