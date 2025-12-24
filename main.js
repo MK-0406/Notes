@@ -143,6 +143,7 @@ class LumiNote {
         this.setupEventListeners();
         this.setupLibraryListeners();
         this.setupInstallPrompt();
+        this.setupExportButton();
         this.render();
     }
 
@@ -1058,20 +1059,30 @@ class LumiNote {
 
         if (this.gestureMode === 'nav') {
             const center = this.getGestureCenter();
-            const distX = center.x - this.lastGestureCenter.x;
-            const distY = center.y - this.lastGestureCenter.y;
 
-            this.container.parentElement.scrollLeft = this.scrollStart.x - distX;
-            this.container.parentElement.scrollTop = this.scrollStart.y - distY;
+            // 1. Handle Panning (Incremental)
+            // Use incremental updates so we don't overwrite setZoom's scroll adjustments
+            const dx = center.x - this.lastGestureCenter.x;
+            const dy = center.y - this.lastGestureCenter.y;
 
+            if (dx !== 0 || dy !== 0) {
+                this.container.parentElement.scrollLeft -= dx;
+                this.container.parentElement.scrollTop -= dy;
+            }
+
+            // 2. Handle Zooming (Pinch)
             const dist = this.getGestureDist();
             if (this.lastGestureDist && dist > 0) {
                 const ratio = dist / this.lastGestureDist;
-                if (Math.abs(1 - ratio) > 0.01) {
+                // Lower threshold for smoother response
+                if (Math.abs(1 - ratio) > 0.002) {
                     this.setZoom(this.viewport.scale * ratio, center);
                     this.lastGestureDist = dist;
                 }
             }
+
+            // Critical: Update anchor for next frame
+            this.lastGestureCenter = center;
             return;
         }
 
@@ -1263,6 +1274,113 @@ class LumiNote {
         });
     }
 
+    setupExportButton() {
+        const header = document.querySelector('.header-right');
+        if (!header || document.getElementById('export-pdf-btn')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'export-pdf-btn';
+        btn.className = 'tool-btn'; // Re-use tool btn style for consistency, or text
+        btn.style.marginLeft = '10px';
+        btn.innerHTML = `
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+               <path d="M13 3H6c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V9l-7-6zm-1 9v6h-2v-6H8l4-4 4 4h-2zm-1-7l5 .5-5 4.5V5z"/>
+            </svg>
+            <span style="font-size:12px; margin-left:4px;">Export</span>
+        `;
+        // Override some style to fit header
+        btn.style.background = 'transparent';
+        btn.style.width = 'auto';
+        btn.style.padding = '0 10px';
+
+        btn.onclick = () => this.exportToPDF();
+        header.prepend(btn);
+    }
+
+    async exportToPDF() {
+        if (!window.jspdf) {
+            alert("PDF Engine loading... Try again in a moment.");
+            return;
+        }
+
+        const btn = document.getElementById('export-pdf-btn');
+        const oldText = btn.innerHTML;
+        btn.innerHTML = `<span style="font-size:12px;">⏳ Generating...</span>`;
+
+        try {
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
+            const pdfW = pdf.internal.pageSize.getWidth();
+            const pdfH = pdf.internal.pageSize.getHeight();
+
+            const APP_W = 841;
+            const APP_H = 1189;
+            // canvas -> pdf scale
+            // Fit height or width? A4 aspect 0.7, App aspect 0.707. Almost same.
+            // Best to fit width.
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = APP_W;
+            tempCanvas.height = APP_H;
+            const ctx = tempCanvas.getContext('2d');
+
+            // Swap global ctx for drawing helpers
+            const originalCtx = this.ctx;
+            this.ctx = ctx;
+
+            for (let i = 0; i < this.pages.length; i++) {
+                if (i > 0) pdf.addPage();
+                const page = this.pages[i];
+
+                // Clear & Fill White
+                ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
+                ctx.clearRect(0, 0, APP_W, APP_H);
+                ctx.fillStyle = 'white';
+                ctx.fillRect(0, 0, APP_W, APP_H);
+
+                // 1. Draw Background
+                if (page.pdfBackground) {
+                    let img = page._pdfImageCache;
+                    if (!img || !img.complete || img.naturalWidth === 0) {
+                        img = new Image();
+                        img.src = page.pdfBackground;
+                        await new Promise(resolve => {
+                            img.onload = resolve;
+                            img.onerror = resolve; // Skip on error
+                        });
+                        page._pdfImageCache = img; // memoize
+                    }
+                    if (img.complete) {
+                        ctx.drawImage(img, 0, 0, APP_W, APP_H);
+                    }
+                } else if (page.template === 'dotted') {
+                    this.drawDotsTo(ctx, APP_W, APP_H);
+                } else if (page.template === 'grid') {
+                    this.drawGridTo(ctx, APP_W, APP_H);
+                }
+
+                // 2. Draw Ink
+                // We must use 1.0 scale for export canvas
+                // drawStroke uses `this.ctx`
+                page.strokes.forEach(s => this.drawStroke(s));
+
+                // 3. Add to PDF
+                // Use JPEG for compression, PNG is too huge
+                const imgData = tempCanvas.toDataURL('image/jpeg', 0.85);
+                pdf.addImage(imgData, 'JPEG', 0, 0, pdfW, pdfH);
+            }
+
+            this.ctx = originalCtx; // Restore
+            pdf.save(`LumiNote_Export_${new Date().toISOString().slice(0, 10)}.pdf`);
+
+        } catch (e) {
+            console.error(e);
+            alert("Export Failed: " + e.message);
+        } finally {
+            btn.innerHTML = oldText;
+        }
+    }
+
     showInstallButton(initialType) {
         const header = document.querySelector('.header-right');
         if (!header || document.getElementById('install-app-btn')) return;
@@ -1450,9 +1568,17 @@ class LumiNote {
         if (eraser.points.length < 2) return;
         const ep2 = eraser.points[eraser.points.length - 1];
         const ep1 = eraser.points[eraser.points.length - 2];
+
         if (this.eraseEntireStroke) {
             this.currentPage.strokes = this.currentPage.strokes.filter(stroke => {
-                if (!stroke.points || stroke.points.length < 2) return true;
+                if (!stroke.points || stroke.points.length === 0) return false;
+
+                // Handle Dots (Single Point Strokes)
+                if (stroke.points.length === 1) {
+                    const dist = this.distToSegment(stroke.points[0], ep1, ep2);
+                    return dist > radius; // Remove if hit
+                }
+
                 for (let i = 0; i < stroke.points.length - 1; i++) {
                     if (this.segmentsDistance(ep1, ep2, stroke.points[i], stroke.points[i + 1]) < radius) return false;
                 }
@@ -1462,8 +1588,16 @@ class LumiNote {
             // Standard Erasing: Split strokes at intersection points
             let newStrokes = [];
             this.currentPage.strokes.forEach(s => {
-                if (!s.points || s.points.length < 2 || s.type === 'image' || s.type === 'text') {
+                if (s.type === 'image' || s.type === 'text') {
                     newStrokes.push(s);
+                    return;
+                }
+                if (!s.points || s.points.length === 0) return;
+
+                // Handle Dots
+                if (s.points.length === 1) {
+                    const dist = this.distToSegment(s.points[0], ep1, ep2);
+                    if (dist > radius) newStrokes.push(s);
                     return;
                 }
 
@@ -1490,7 +1624,6 @@ class LumiNote {
             });
             this.currentPage.strokes = newStrokes;
         }
-        // Force immediate render for erase feedback
         this.render();
     }
 
@@ -1562,7 +1695,8 @@ class LumiNote {
                 if (this.tool === 'eraser' && this.isDrawing) {
                     const last = this.currentStroke.points[this.currentStroke.points.length - 1];
                     inkCtx.beginPath(); inkCtx.arc(last.x, last.y, this.lineWidth / 2, 0, Math.PI * 2);
-                    inkCtx.fillStyle = 'rgba(0,122,255,0.1)'; inkCtx.fill();
+                    inkCtx.fillStyle = 'rgba(150,150,150,0.2)'; inkCtx.fill();
+                    inkCtx.strokeStyle = '#888'; inkCtx.lineWidth = 1; inkCtx.stroke();
                 }
             }
             if (this.currentPageIndex === index && (this.lassoPath || this.selectedStrokes.length > 0)) {
@@ -1614,7 +1748,7 @@ class LumiNote {
     }
 
     drawDotsTo(ctx, w, h) {
-        ctx.fillStyle = '#ccc';
+        ctx.fillStyle = '#b0b0b0'; // Neutral Grey
         for (let x = 30; x < w; x += 30) {
             for (let y = 30; y < h; y += 30) {
                 ctx.beginPath(); ctx.arc(x, y, 1, 0, Math.PI * 2); ctx.fill();
@@ -1703,6 +1837,10 @@ class LumiNote {
     drawStroke(s) {
         if (!s) return;
 
+        // Fix: Explicitly ignore eraser strokes in the draw loop. 
+        // Eraser visual is handled via cursor overlay only.
+        if (s.type === 'eraser') return;
+
         // Handle Non-Path Strokes
         if (s.type === 'text') {
             this.ctx.fillStyle = s.color || '#000000';
@@ -1712,9 +1850,12 @@ class LumiNote {
             return;
         }
         if (s.type === 'image') {
-            const img = this.getImage(s.src);
+            const img = new Image();
+            img.src = s.data; // Assuming s.data now holds the image source
             if (img.complete) {
                 this.ctx.drawImage(img, s.x, s.y, s.w, s.h);
+            } else {
+                img.onload = () => this.ctx.drawImage(img, s.x, s.y, s.w, s.h);
             }
             return;
         }
@@ -1727,6 +1868,7 @@ class LumiNote {
         this.ctx.lineCap = 'round';
         this.ctx.lineJoin = 'round';
         this.ctx.strokeStyle = s.color === 'eraser' ? '#ffffff' : s.color;
+        this.ctx.fillStyle = this.ctx.strokeStyle; // <--- FIX: Ensure fill matches stroke for dots
         this.ctx.globalAlpha = s.opacity || 1;
 
         // Force maximum smoothing quality for organic curves
@@ -1762,7 +1904,7 @@ class LumiNote {
     }
 
     drawDots(w, h) {
-        this.ctx.fillStyle = '#d2d2d7';
+        this.ctx.fillStyle = '#b0b0b0'; // Neutral Grey (was #d2d2d7 which looked blueish)
         for (let x = 20; x < w; x += 20)
             for (let y = 20; y < h; y += 20)
                 this.ctx.fillRect(x, y, 0.5, 0.5);
