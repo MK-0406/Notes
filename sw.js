@@ -1,4 +1,4 @@
-const CACHE_NAME = 'luminote-v9.7';
+const CACHE_NAME = 'luminote-v9.9';
 const ASSETS = [
     './',
     './index.html',

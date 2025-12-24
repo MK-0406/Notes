@@ -194,14 +194,15 @@ class LumiNote {
         const canvases = container.querySelectorAll('canvas');
         const baseW = 841;
         const baseH = 1189;
-        const dpr = this.dpr || 2;
+        const renderDpr = this.getOptimalDPR();
 
         canvases.forEach(canvas => {
             if (isVisible) {
                 // Hydrate: Restore dimensions if needed
-                if (canvas.width <= 1) {
-                    canvas.width = baseW * dpr;
-                    canvas.height = baseH * dpr;
+                // Check if width matches target (allowing for small rounding diffs)
+                if (canvas.width <= 1 || Math.abs(canvas.width - baseW * renderDpr) > 5) {
+                    canvas.width = baseW * renderDpr;
+                    canvas.height = baseH * renderDpr;
                     // Force re-render of this page
                     this.pages[index].hasBgChanged = true;
                     // We need to render specifically this page
@@ -220,9 +221,17 @@ class LumiNote {
         if (isVisible) this.render();
     }
 
+    getOptimalDPR() {
+        // Base DPR: Allow up to 3.0 for flagship tablets
+        const screenDPR = Math.min(window.devicePixelRatio || 2, 3);
+        const zoom = this.viewport.scale || 1.0;
+        // Dynamic Resolution: Scale canvas with zoom, but cap at 3.5x to prevent crashes
+        return Math.min(3.5, screenDPR * zoom);
+    }
+
     setupPages() {
-        this.dpr = Math.min(window.devicePixelRatio || 2, 2);
-        const dpr = this.dpr;
+        this.dpr = Math.min(window.devicePixelRatio || 2, 3);
+        const renderDpr = this.getOptimalDPR();
         const scale = this.viewport.scale || 1.0;
 
         const baseW = 841;
@@ -277,8 +286,8 @@ class LumiNote {
             pContainer.style.height = visualH + 'px';
 
             [bgCanvas, inkCanvas].forEach(c => {
-                c.width = baseW * dpr;
-                c.height = baseH * dpr;
+                c.width = baseW * renderDpr;
+                c.height = baseH * renderDpr;
                 c.style.width = '100%';
                 c.style.height = '100%';
                 if (c === bgCanvas) {
@@ -300,15 +309,44 @@ class LumiNote {
     setupZoomHandlers() {
         const scrollContainer = this.container.parentElement;
 
-        // Wheel Zoom (Ctrl + Wheel)
+        // 1. Wheel Zoom (Trackpad/Mouse) - Fluid Math
         scrollContainer.addEventListener('wheel', (e) => {
             if (e.ctrlKey || e.metaKey) {
                 e.preventDefault();
-                // Reduce sensitivity for smoother control
-                const delta = e.deltaY > 0 ? 0.95 : 1.05;
-                this.setZoom(this.viewport.scale * delta, { x: e.clientX, y: e.clientY });
+                // Use exponential decay for smooth, proportional zooming
+                // e.deltaY is small for trackpads, large for mice. This handles both better.
+                const zoomFactor = Math.exp(-e.deltaY * 0.01);
+
+                this.setZoom(this.viewport.scale * zoomFactor, { x: e.clientX, y: e.clientY });
             }
         }, { passive: false });
+
+        // 2. Native Safari/Mac Gesture Support (Pinch)
+        // This provides the smoothest experience on Mac Trackpads
+        let startScale = 1;
+
+        const onGestureStart = (e) => {
+            e.preventDefault();
+            startScale = this.viewport.scale;
+        };
+
+        const onGestureChange = (e) => {
+            e.preventDefault();
+            // e.scale is relative to gesture start
+            const target = startScale * e.scale;
+            this.setZoom(target, { x: e.clientX, y: e.clientY });
+        };
+
+        const onGestureEnd = (e) => {
+            e.preventDefault();
+        };
+
+        // Attach safely (non-standard events)
+        if ('ongesturestart' in window || 'ongesturestart' in scrollContainer) {
+            scrollContainer.addEventListener('gesturestart', onGestureStart);
+            scrollContainer.addEventListener('gesturechange', onGestureChange);
+            scrollContainer.addEventListener('gestureend', onGestureEnd);
+        }
     }
 
     setZoom(newScale, center = null) {
@@ -1452,7 +1490,7 @@ class LumiNote {
     }
 
     render() {
-        const dpr = this.dpr || 2.0;
+        const dpr = this.getOptimalDPR();
         const containers = this.container.querySelectorAll('.page-container');
         const baseW = 841;
         const baseH = 1189;
