@@ -306,27 +306,49 @@ class LumiNote {
                 e.preventDefault();
                 // Reduce sensitivity for smoother control
                 const delta = e.deltaY > 0 ? 0.95 : 1.05;
-                this.setZoom(this.viewport.scale * delta);
+                this.setZoom(this.viewport.scale * delta, { x: e.clientX, y: e.clientY });
             }
         }, { passive: false });
     }
 
-    setZoom(newScale) {
+    setZoom(newScale, center = null) {
         // Safe limit: Max 3.0x to prevent mobile browser canvas allocation failures
         const target = Math.max(0.4, Math.min(3.0, newScale));
         if (this.viewport.scale === target) return;
 
+        const oldScale = this.viewport.scale;
+        let scrollAdjust = null;
+
+        // Calculate scroll adjustment to keep center point fixed
+        if (center) {
+            const scroller = this.container.parentElement;
+            const rect = scroller.getBoundingClientRect();
+            // Mouse/Pinch position relative to the viewport
+            const pX = center.x - rect.left;
+            const pY = center.y - rect.top;
+
+            const currentScrollL = scroller.scrollLeft;
+            const currentScrollT = scroller.scrollTop;
+
+            // Math: The content point under the cursor must remain under the cursor.
+            // (scroll + cursor) / scale = content_point
+            const newScrollL = ((currentScrollL + pX) / oldScale * target) - pX;
+            const newScrollT = ((currentScrollT + pY) / oldScale * target) - pY;
+
+            scrollAdjust = { x: newScrollL, y: newScrollT };
+        }
+
         this.viewport.scale = target;
-
-        // SHARPNESS FIX: Remove container scaling, and instead update individual canvas CSS sizes
-        // this.container.style.transform = 'none'; // No longer needed, scaling is per-canvas
-        // this.container.style.transformOrigin = 'unset'; // No longer needed
-        // this.container.style.width = '100%'; // No longer needed
-
         this.setupPages();
         this.render();
 
-        console.log(`Zoom set to ${Math.round(this.viewport.scale * 100)}% (Native High-Res)`);
+        if (scrollAdjust) {
+            const scroller = this.container.parentElement;
+            scroller.scrollLeft = scrollAdjust.x;
+            scroller.scrollTop = scrollAdjust.y;
+        }
+
+        console.log(`Zoom set to ${Math.round(this.viewport.scale * 100)}%`);
     }
 
     initializeVisuals() {
@@ -1008,7 +1030,7 @@ class LumiNote {
             if (this.lastGestureDist && dist > 0) {
                 const ratio = dist / this.lastGestureDist;
                 if (Math.abs(1 - ratio) > 0.01) {
-                    this.setZoom(this.viewport.scale * ratio);
+                    this.setZoom(this.viewport.scale * ratio, center);
                     this.lastGestureDist = dist;
                 }
             }
