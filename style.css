@@ -162,6 +162,26 @@ body {
     font-size: 14px;
 }
 
+.install-app-btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.3);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: transform 0.2s;
+}
+
+.install-app-btn:active {
+    transform: scale(0.95);
+}
+
 /* Main Toolbar */
 .toolbar-container {
     background: var(--toolbar-bg);

@@ -99,7 +99,7 @@ class LumiNote {
         this.lastGestureCenter = null;
 
         this.laserTrail = [];
-        this.dpr = 4.0;
+        this.dpr = Math.min(window.devicePixelRatio || 2, 2); // Cap at 2.0 (Fixed)
 
         // Multi-Notebook & Folder State (v6.8)
         this.notebooks = [];
@@ -142,6 +142,7 @@ class LumiNote {
         this.setupZoomHandlers();
         this.setupEventListeners();
         this.setupLibraryListeners();
+        this.setupInstallPrompt();
         this.render();
     }
 
@@ -158,6 +159,7 @@ class LumiNote {
     }
 
     setupScrollObserver() {
+        // Optimize memory by virtualizing canvases (only keep pixels for visible pages)
         this.observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 const idx = parseInt(entry.target.dataset.pageIndex);
@@ -165,15 +167,12 @@ class LumiNote {
                     const wasVisible = this.pages[idx].isVisible;
                     this.pages[idx].isVisible = entry.isIntersecting;
 
-                    // If a page becomes visible and background needs refresh, trigger render
-                    if (!wasVisible && entry.isIntersecting) {
-                        this.pages[idx].hasBgChanged = true;
-                        this.render();
-                    }
+                    // Dehydrate (free memory) or Hydrate (allocate memory)
+                    this.managePageMemory(idx, entry.isIntersecting);
                 }
             });
 
-            // Update current page indicator based on max visibility
+            // Update current page indicator
             const visibleEntries = [...entries].filter(e => e.isIntersecting);
             if (visibleEntries.length > 0) {
                 const mostVisible = visibleEntries.reduce((prev, curr) =>
@@ -185,11 +184,44 @@ class LumiNote {
                     this.updatePageIndicator();
                 }
             }
-        }, { threshold: [0.01, 0.5, 0.9], rootMargin: '200px' });
+        }, { threshold: [0.01, 0.5, 0.9], rootMargin: '400px' }); // Larger margin for smoother scroll
+    }
+
+    managePageMemory(index, isVisible) {
+        const container = this.container.querySelectorAll('.page-container')[index];
+        if (!container) return;
+
+        const canvases = container.querySelectorAll('canvas');
+        const baseW = 841;
+        const baseH = 1189;
+        const dpr = this.dpr || 2;
+
+        canvases.forEach(canvas => {
+            if (isVisible) {
+                // Hydrate: Restore dimensions if needed
+                if (canvas.width <= 1) {
+                    canvas.width = baseW * dpr;
+                    canvas.height = baseH * dpr;
+                    // Force re-render of this page
+                    this.pages[index].hasBgChanged = true;
+                    // We need to render specifically this page
+                    // But standard render() loops all. That's fine as long as lightweight.
+                }
+            } else {
+                // Dehydrate: Kill memory
+                // We keep DOM element, but zero the pixel buffer
+                if (canvas.width > 1) {
+                    canvas.width = 1;
+                    canvas.height = 1;
+                }
+            }
+        });
+
+        if (isVisible) this.render();
     }
 
     setupPages() {
-        this.dpr = 3.0; // Optimized for mobile memory stability while keeping retina sharpness
+        this.dpr = Math.min(window.devicePixelRatio || 2, 2);
         const dpr = this.dpr;
         const scale = this.viewport.scale || 1.0;
 
@@ -1154,6 +1186,37 @@ class LumiNote {
         }
     }
 
+    setupInstallPrompt() {
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            this.deferredInstallPrompt = e;
+            this.showInstallButton();
+        });
+    }
+
+    showInstallButton() {
+        const header = document.querySelector('.header-right');
+        if (!header || document.getElementById('install-app-btn')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'install-app-btn';
+        btn.className = 'install-app-btn';
+        btn.innerHTML = '<span>↓</span> Install App';
+
+        btn.onclick = async () => {
+            if (this.deferredInstallPrompt) {
+                this.deferredInstallPrompt.prompt();
+                const { outcome } = await this.deferredInstallPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    btn.remove();
+                }
+                this.deferredInstallPrompt = null;
+            }
+        };
+
+        header.prepend(btn);
+    }
+
     pushUndo(pageIndex, oldStrokesState) {
         this.undoStack.push({
             pageIndex: pageIndex,
@@ -1367,7 +1430,7 @@ class LumiNote {
     }
 
     render() {
-        const dpr = this.dpr || 8.0;
+        const dpr = this.dpr || 2.0;
         const containers = this.container.querySelectorAll('.page-container');
         const baseW = 841;
         const baseH = 1189;

@@ -5,12 +5,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>LumiNote | Pro Digital Notebook</title>
-    <link rel="stylesheet" href="style.css?v=9.3">
+    <link rel="stylesheet" href="style.css?v=9.6">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <!-- PDF.js Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+    <!-- PWA Settings -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="LumiNote">
+    <link rel="apple-touch-icon" href="icon-192.png">
 </head>
 
 <body class="goodnotes-theme">
@@ -26,7 +33,7 @@
                     </div>
                     <button id="add-notebook-tab-btn" class="add-tab-btn" title="New Notebook">+</button>
                 </div>
-                <span style="font-size: 10px; color: #888; margin-left: 10px; opacity: 0.5;">v9.3</span>
+                <span style="font-size: 10px; color: #888; margin-left: 10px; opacity: 0.5;">v9.6</span>
                 <span id="save-status"
                     style="font-size: 11px; color: #8e8e93; margin-left: 10px; font-weight: 500; transition: opacity 0.3s;"></span>
             </div>
@@ -320,10 +327,10 @@
 
         <input type="file" id="image-upload-input" accept="image/*" multiple style="display: none;">
         <input type="file" id="pdf-upload-input" accept="application/pdf,.pdf" multiple style="display: none;">
-        <script src="main.js?v=9.3"></script>
+        <script src="main.js?v=9.6"></script>
         <script>
             if ('serviceWorker' in navigator) {
-                navigator.serviceWorker.register('./sw.js?v=9.3').then(reg => {
+                navigator.serviceWorker.register('./sw.js?v=9.6').then(reg => {
                     reg.onupdatefound = () => {
                         const installingWorker = reg.installing;
                         installingWorker.onstatechange = () => {

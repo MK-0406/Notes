@@ -3,9 +3,9 @@
   "short_name": "LumiNote",
   "start_url": "index.html",
   "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#3b82f6",
-  "orientation": "landscape",
+  "background_color": "#F2F2F7",
+  "theme_color": "#F2F2F7",
+  "orientation": "any",
   "icons": [
     {
       "src": "icon-192.png",
