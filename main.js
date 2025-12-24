@@ -1247,14 +1247,23 @@ class LumiNote {
     }
 
     setupInstallPrompt() {
+        const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+        if (isStandalone) return;
+
+        // 1. Immediately show button in "Manual/Instruction" mode
+        // This ensures the user SEES it, regardless of OS detection failure
+        this.showInstallButton('manual');
+
+        // 2. If Native Prompt becomes available (Android/Chrome/Desktop), upgrade the mode
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
             this.deferredInstallPrompt = e;
-            this.showInstallButton();
+            // The button logic dynamically checks deferredInstallPrompt, so no UI change needed
+            console.log("Native Install Prompt Captured");
         });
     }
 
-    showInstallButton() {
+    showInstallButton(initialType) {
         const header = document.querySelector('.header-right');
         if (!header || document.getElementById('install-app-btn')) return;
 
@@ -1265,12 +1274,20 @@ class LumiNote {
 
         btn.onclick = async () => {
             if (this.deferredInstallPrompt) {
+                // Native Install (Android / Chrome)
                 this.deferredInstallPrompt.prompt();
                 const { outcome } = await this.deferredInstallPrompt.userChoice;
-                if (outcome === 'accepted') {
-                    btn.remove();
-                }
+                if (outcome === 'accepted') btn.remove();
                 this.deferredInstallPrompt = null;
+            } else {
+                // Manual Instructions (iOS / Safari / others)
+                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+                if (isIOS) {
+                    alert("📲 To Install on iPad/iPhone:\n\n1. Tap the Share button (box with arrow) in the toolbar.\n2. Scroll down and tap 'Add to Home Screen'.");
+                } else {
+                    alert("📲 To Install:\n\n1. Open your browser menu (⋮ or Share).\n2. Select 'Install App' or 'Add to Home Screen'.");
+                }
             }
         };
 
